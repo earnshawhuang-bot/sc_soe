@@ -1,6 +1,6 @@
 # Data files (too large / sensitive)
 Order Fullfill Projection/
-output/
+/output/
 
 # Python
 __pycache__/

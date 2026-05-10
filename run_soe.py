@@ -81,7 +81,7 @@ def main():
 
     # --- Phase 3: Output ---
     print("Writing outputs...")
-    excel_path = write_excel(master, str(output_dir), month, target_mt)
+    excel_path = write_excel(master, str(output_dir), month, target_mt, data_date)
     print(f"  Excel: {excel_path}")
 
     html_path = write_html_report(master, str(output_dir), month, target_mt, data_date)
