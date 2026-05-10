@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>S&OE Data Flow — 数据流全景图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    background: #f5f6fa;
+    color: #2d3436;
+    padding: 40px 20px;
+  }
+  .container { max-width: 1400px; margin: 0 auto; }
+
+  h1 { text-align: center; font-size: 28px; color: #1a237e; margin-bottom: 6px; }
+  .subtitle { text-align: center; font-size: 15px; color: #636e72; margin-bottom: 50px; }
+
+  /* ── Phase Header ── */
+  .phase {
+    position: relative;
+    margin-bottom: 24px;
+  }
+  .phase-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .phase-num {
+    width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 16px; flex-shrink: 0;
+  }
+  .phase-title { font-size: 18px; font-weight: 700; }
+  .phase-desc { font-size: 13px; color: #636e72; margin-left: auto; }
+
+  /* ── Cards Grid ── */
+  .cards { display: flex; gap: 14px; flex-wrap: wrap; }
+  .card {
+    flex: 1;
+    min-width: 200px;
+    border-radius: 10px;
+    padding: 18px;
+    border-left: 4px solid;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  .card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.1);
+  }
+  .card-title {
+    font-size: 14px; font-weight: 700; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .card-file { font-size: 11px; color: #636e72; margin-bottom: 10px; }
+  .card-rows { font-size: 11px; color: #fff; background: #636e72; border-radius: 10px; padding: 1px 8px; display: inline-block; margin-bottom: 10px; }
+  .card-fields { font-size: 12px; line-height: 1.7; }
+  .card-fields .field { display: flex; gap: 6px; }
+  .card-fields .field-name { color: #636e72; flex-shrink: 0; min-width: 70px; }
+  .card-fields .field-val { }
+  .card-warn { font-size: 11px; color: #d63031; margin-top: 8px; font-weight: 600; }
+
+  /* ── Phase Colors ── */
+  .p1 .phase-num { background: #1565c0; }
+  .p1 .phase-title { color: #1565c0; }
+  .p1 .card { background: #e8f0fe; border-color: #1565c0; }
+
+  .p2 .phase-num { background: #e65100; }
+  .p2 .phase-title { color: #e65100; }
+  .p2 .card { background: #fff3e0; border-color: #e65100; }
+
+  .p3 .phase-num { background: #2e7d32; }
+  .p3 .phase-title { color: #2e7d32; }
+
+  .p4 .phase-num { background: #c62828; }
+  .p4 .phase-title { color: #c62828; }
+
+  .p5 .phase-num { background: #6a1b9a; }
+  .p5 .phase-title { color: #6a1b9a; }
+  .p5 .card { background: #f3e5f5; border-color: #6a1b9a; }
+
+  /* ── Join Box ── */
+  .join-box {
+    background: #e8f5e9;
+    border: 2px solid #2e7d32;
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .join-title { font-size: 15px; font-weight: 700; color: #2e7d32; margin-bottom: 14px; }
+  .join-row {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; padding: 6px 0;
+    border-bottom: 1px dashed #c8e6c9;
+  }
+  .join-row:last-child { border-bottom: none; }
+  .join-left { font-weight: 600; min-width: 80px; }
+  .join-op { color: #2e7d32; font-weight: 700; font-family: monospace; }
+  .join-right { }
+  .join-key { background: #fff9c4; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+  .join-warn {
+    margin-top: 14px; padding: 10px 14px;
+    background: #fff3e0; border-left: 3px solid #e65100;
+    border-radius: 0 6px 6px 0; font-size: 12px;
+  }
+
+  /* ── Engine Grid ── */
+  .engine-grid { display: flex; gap: 16px; }
+  .engine-col { flex: 1; }
+  .engine-box {
+    border-radius: 10px; padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  }
+  .engine-box h3 { font-size: 14px; margin-bottom: 14px; }
+
+  .status-box { background: #fce4ec; border-left: 4px solid #c62828; }
+  .gap-box { background: #fff8e1; border-left: 4px solid #f57f17; }
+  .risk-box { background: #fbe9e7; border-left: 4px solid #bf360c; }
+
+  .status-item {
+    display: flex; align-items: flex-start; gap: 8px;
+    font-size: 13px; padding: 5px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.05);
+  }
+  .status-item:last-child { border-bottom: none; }
+  .status-num { font-weight: 700; color: #c62828; flex-shrink: 0; width: 20px; }
+  .status-icon { flex-shrink: 0; width: 22px; text-align: center; }
+  .status-name { font-weight: 600; }
+  .status-desc { color: #636e72; font-size: 12px; }
+
+  .gap-formula {
+    background: #fff; border-radius: 8px; padding: 14px;
+    font-family: monospace; font-size: 14px; text-align: center;
+    margin-bottom: 14px; border: 1px solid #ffe082;
+  }
+  .gap-item { font-size: 13px; padding: 5px 0; display: flex; gap: 8px; align-items: center; }
+
+  .risk-item { font-size: 13px; padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,0.05); }
+  .risk-item:last-child { border-bottom: none; }
+  .risk-level { font-weight: 700; }
+
+  /* ── Connector arrows ── */
+  .connector {
+    text-align: center;
+    padding: 16px 0;
+    font-size: 24px;
+    color: #b0bec5;
+    letter-spacing: 12px;
+  }
+  .connector.red { color: #e53935; }
+
+  /* ── Footer ── */
+  .footer-note {
+    text-align: center; margin-top: 30px; padding: 14px;
+    background: #eceff1; border-radius: 8px; font-size: 13px; color: #546e7a;
+  }
+  .footer-note strong { color: #37474f; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>S&OE Order Fulfillment Tracking</h1>
+<p class="subtitle">数据流全景图：从原始 Excel → 清洗标准化 → 关联合并 → 状态判定 → 输出</p>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- PHASE 1 -->
+<!-- ═══════════════════════════════════════ -->
+<div class="phase p1">
+  <div class="phase-header">
+    <div class="phase-num">1</div>
+    <div class="phase-title">Raw Data Sources 原始数据源</div>
+    <div class="phase-desc">6 个文件夹，14 个 Excel 文件</div>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-title">📋 01-SC 销售订单</div>
+      <div class="card-file">Order tracking 0507.xlsx</div>
+      <span class="card-rows">1,266 行</span>
+      <div class="card-fields">
+        <div class="field"><span class="field-name">SC NO</span> <span class="field-val">→ SO 号（主键）</span></div>
+        <div class="field"><span class="field-name">Supply from</span> <span class="field-val">→ KS / IDN</span></div>
+        <div class="field"><span class="field-name">Cluster</span> <span class="field-val">→ 区域</span></div>
+        <div class="field"><span class="field-name">SC Vol.-MT</span> <span class="field-val">→ 订单量（吨）</span></div>
+        <div class="field"><span class="field-name">Order status</span> <span class="field-val">→ 订单状态</span></div>
+        <div class="field"><span class="field-name">Carryover</span> <span class="field-val">→ 结转标识</span></div>
+        <div class="field"><span class="field-name">Loading date</span> <span class="field-val">→ 要求装运日期</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🚢 02-Shipped 已发货</div>
+      <div class="card-file">GI (KS&IDN) 260501-0507.xlsx</div>
+      <span class="card-rows">4,986 行</span>
+      <div class="card-fields">
+        <div class="field"><span class="field-name">过账日期</span> <span class="field-val">→ 实际发货日期</span></div>
+        <div class="field"><span class="field-name">工厂</span> <span class="field-val">→ 3000/3001=KS, 3301=IDN</span></div>
+        <div class="field"><span class="field-name">销售订单(Q)</span> <span class="field-val">→ SO 号</span></div>
+        <div class="field"><span class="field-name">重量(KG)</span> <span class="field-val">→ ×(-1), ÷1000 = MT</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📦 03-FG 成品库存</div>
+      <div class="card-file">FG stock 050826.xlsx</div>
+      <span class="card-rows">3,940 行</span>
+      <div class="card-fields">
+        <div class="field"><span class="field-name">工厂</span> <span class="field-val">→ 仅 3000/3001 (KS)</span></div>
+        <div class="field"><span class="field-name">重量(KG)</span> <span class="field-val">→ ÷1000 = MT</span></div>
+        <div class="field"><span class="field-name">入库日期</span> <span class="field-val">→ 到库时间</span></div>
+        <div class="field"><span class="field-name">合同编码</span> <span class="field-val">→ SO 号</span></div>
+      </div>
+      <div class="card-warn">⚠️ IDN 数据缺失，后续补充</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🏭 04-PP 生产计划</div>
+      <div class="card-file">SAM / DAVIS / KSII / IND + Global_PP_wo</div>
+      <span class="card-rows">有排产 1,768 行 + 无排产 221 行</span>
+      <div class="card-fields">
+        <div class="field"><span class="field-name">工单号</span> <span class="field-val">→ 生产工单标识</span></div>
+        <div class="field"><span class="field-name">SO</span> <span class="field-val">→ 销售订单号</span></div>
+        <div class="field"><span class="field-name">Planned End</span> <span class="field-val">→ 计划完工日期</span></div>
+        <div class="field"><span class="field-name">Plant</span> <span class="field-val">→ KS / IND</span></div>
+        <div class="field"><span class="field-name">TotalWeight/T</span> <span class="field-val">→ 重量 MT</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📥 05-GR 实际入库</div>
+      <div class="card-file">MB51 GR data 260501-260507.xlsx</div>
+      <span class="card-rows">6,117 行</span>
+      <div class="card-fields">
+        <div class="field"><span class="field-name">过账日期</span> <span class="field-val">→ 实际入库日期</span></div>
+        <div class="field"><span class="field-name">工厂</span> <span class="field-val">→ 3000/3001/3301</span></div>
+        <div class="field"><span class="field-name">订单(J列)</span> <span class="field-val">→ 工单号 ⚠️ 非SO</span></div>
+        <div class="field"><span class="field-name">重量(KG)</span> <span class="field-val">→ ÷1000 = MT</span></div>
+      </div>
+      <div class="card-warn">⚠️ 无 SO 号！必须经 PP 工单号中转</div>
+    </div>
+
+    <div class="card" style="flex: 1.5;">
+      <div class="card-title">🚛 06-Loading Plan 发货计划</div>
+      <div class="card-file">3 个文件 × 不同结构</div>
+      <div class="card-fields" style="font-size: 12px; line-height: 1.8;">
+        <div><strong>KS:</strong> LoadingPlan (357行) — 发票号拆分→SO, 柜型→MT</div>
+        <div><strong>IDN出口:</strong> Schedule Planning Dispatch / ORDER OUTSTANDING (255柜) — SC No. + ELD + Cont Qty/Size</div>
+        <div><strong>IDN内销:</strong> NEW DOMESTIC TRACKING (327行) — INV NO.(需拆分) + Weight + ELD</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="connector">▼ ▼ ▼ ▼ ▼ ▼</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- PHASE 2 -->
+<!-- ═══════════════════════════════════════ -->
+<div class="phase p2">
+  <div class="phase-header">
+    <div class="phase-num">2</div>
+    <div class="phase-title">Extract & Standardize 清洗标准化</div>
+    <div class="phase-desc">统一 SO 号格式、单位(MT)、Plant 映射(KS/IDN)</div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="card-title">sc_df</div><div class="card-fields">SO号, Plant, Cluster<br>订单量MT, 订单类型</div></div>
+    <div class="card"><div class="card-title">shipped_df</div><div class="card-fields">SO号, Plant<br>发货日期, 发货量MT</div></div>
+    <div class="card"><div class="card-title">fg_df</div><div class="card-fields">SO号, Plant(仅KS)<br>库存量MT, 入库日期</div></div>
+    <div class="card"><div class="card-title">pp_sched_df<br>pp_unsched_df</div><div class="card-fields">工单号, SO号, Plant<br>计划完工日期(有/无), MT</div></div>
+    <div class="card"><div class="card-title">gr_df</div><div class="card-fields">工单号, Plant<br>入库日期, 入库量MT</div></div>
+    <div class="card"><div class="card-title">lp_ks_df<br>lp_idn_df<br>lp_idn_dom_df</div><div class="card-fields">SO号, 装货日期<br>柜量MT, Cluster</div></div>
+  </div>
+</div>
+
+<div class="connector">▼ ▼ ▼ ▼ ▼ ▼</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- PHASE 3 -->
+<!-- ═══════════════════════════════════════ -->
+<div class="phase p3">
+  <div class="phase-header">
+    <div class="phase-num">3</div>
+    <div class="phase-title">Join & Enrich 数据关联</div>
+    <div class="phase-desc">以 SO 号为主键，LEFT JOIN 所有数据源</div>
+  </div>
+  <div class="join-box">
+    <div class="join-title">so_master_df — SO 级别全量关联表</div>
+    <div class="join-row">
+      <span class="join-left">sc_df</span>
+      <span class="join-op">LEFT JOIN</span>
+      <span class="join-right">shipped_df</span>
+      <span class="join-key">ON SO号</span>
+      <span style="color:#636e72; font-size:12px;">→ 已发货量 & 发货日期</span>
+    </div>
+    <div class="join-row">
+      <span class="join-left">sc_df</span>
+      <span class="join-op">LEFT JOIN</span>
+      <span class="join-right">fg_df</span>
+      <span class="join-key">ON SO号</span>
+      <span style="color:#636e72; font-size:12px;">→ 在库量</span>
+    </div>
+    <div class="join-row">
+      <span class="join-left">sc_df</span>
+      <span class="join-op">LEFT JOIN</span>
+      <span class="join-right">pp_sched_df / pp_unsched_df</span>
+      <span class="join-key">ON SO号</span>
+      <span style="color:#636e72; font-size:12px;">→ 排产信息 & 计划完工日期</span>
+    </div>
+    <div class="join-row">
+      <span class="join-left">sc_df</span>
+      <span class="join-op">LEFT JOIN</span>
+      <span class="join-right">gr_enriched_df</span>
+      <span class="join-key">ON SO号</span>
+      <span style="color:#636e72; font-size:12px;">→ 实际入库量</span>
+    </div>
+    <div class="join-row">
+      <span class="join-left">sc_df</span>
+      <span class="join-op">LEFT JOIN</span>
+      <span class="join-right">lp_ks_df / lp_idn_df / lp_idn_dom_df</span>
+      <span class="join-key">ON SO号</span>
+      <span style="color:#636e72; font-size:12px;">→ 装货日期 (Required Loading Date)</span>
+    </div>
+    <div class="join-warn">
+      <strong>⚠️ GR → SO 间接关联：</strong>gr_df 没有 SO 号，必须先通过
+      <span class="join-key">gr.订单号</span> → <span class="join-key">pp.工单号</span> → <span class="join-key">pp.SO</span>
+      中转得到 gr_enriched_df，再参与 JOIN
+    </div>
+  </div>
+</div>
+
+<div class="connector red">▼ ▼ ▼</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- PHASE 4 -->
+<!-- ═══════════════════════════════════════ -->
+<div class="phase p4">
+  <div class="phase-header">
+    <div class="phase-num">4</div>
+    <div class="phase-title">Status Engine 状态判定 + Gap 计算</div>
+    <div class="phase-desc">对每张 SO 判定交付状态，计算生产与装运的时间差</div>
+  </div>
+  <div class="engine-grid">
+    <!-- Status -->
+    <div class="engine-col">
+      <div class="engine-box status-box">
+        <h3>状态判定逻辑（按优先级从高到低）</h3>
+        <div class="status-item"><span class="status-num">①</span><span class="status-icon">✅</span><div><span class="status-name">Fully Shipped</span><br><span class="status-desc">shipped_qty ≥ order_qty → 已全部发货</span></div></div>
+        <div class="status-item"><span class="status-num">②</span><span class="status-icon">🟡</span><div><span class="status-name">Partially Shipped</span><br><span class="status-desc">shipped_qty > 0 但 < order_qty → 部分发货</span></div></div>
+        <div class="status-item"><span class="status-num">③</span><span class="status-icon">🟢</span><div><span class="status-name">In Stock</span><br><span class="status-desc">fg_qty > 0 → 已产出在库，待发货</span></div></div>
+        <div class="status-item"><span class="status-num">④</span><span class="status-icon">🟢</span><div><span class="status-name">Produced (GR)</span><br><span class="status-desc">gr_qty > 0 → 已生产入库确认</span></div></div>
+        <div class="status-item"><span class="status-num">⑤</span><span class="status-icon">⏳</span><div><span class="status-name">In Production</span><br><span class="status-desc">有 planned_end_date → 排产中，需算 Gap</span></div></div>
+        <div class="status-item"><span class="status-num">⑥</span><span class="status-icon">🟠</span><div><span class="status-name">Planned Only</span><br><span class="status-desc">有工单但无排期 → 高风险</span></div></div>
+        <div class="status-item"><span class="status-num">⑦</span><span class="status-icon">🔴</span><div><span class="status-name">No Plan</span><br><span class="status-desc">SC 中有但 PP 中完全找不到 → 极高风险</span></div></div>
+      </div>
+    </div>
+
+    <!-- Gap -->
+    <div class="engine-col">
+      <div class="engine-box gap-box">
+        <h3>Gap 计算（仅对 ⑤ In Production）</h3>
+        <div class="gap-formula">
+          Gap = Loading Date − (Planned End Date + 1天)
+        </div>
+        <p style="font-size:12px; color:#636e72; margin-bottom:14px;">+1天：生产完工后次日视为最早可入库/装货时间</p>
+        <div class="gap-item"><span style="font-size:18px;">🔴</span><div><strong>Gap &lt; 0</strong> — 生产滞后 |Gap| 天<br><span style="color:#636e72; font-size:12px;">需要催产 或 推后船期</span></div></div>
+        <div class="gap-item"><span style="font-size:18px;">🟡</span><div><strong>Gap = 0 ~ 2</strong> — 紧张，几乎无缓冲<br><span style="color:#636e72; font-size:12px;">需要密切关注</span></div></div>
+        <div class="gap-item"><span style="font-size:18px;">🟢</span><div><strong>Gap &gt; 2</strong> — 有缓冲<br><span style="color:#636e72; font-size:12px;">正常推进</span></div></div>
+      </div>
+    </div>
+
+    <!-- Risk -->
+    <div class="engine-col">
+      <div class="engine-box risk-box">
+        <h3>风险等级汇总</h3>
+        <div class="risk-item"><span class="risk-level" style="color:#b71c1c;">🔴🔴 Critical</span><br>No Plan — 有订单但完全无生产安排</div>
+        <div class="risk-item"><span class="risk-level" style="color:#c62828;">🔴 High</span><br>Gap &lt; 0 或 Planned Only — 生产滞后 / 未排具体日期</div>
+        <div class="risk-item"><span class="risk-level" style="color:#f57f17;">🟡 Medium</span><br>Gap 0~2 或 Partial Shipped — 紧张但尚可调度</div>
+        <div class="risk-item"><span class="risk-level" style="color:#2e7d32;">🟢 Low</span><br>Gap &gt; 2 / In Stock / Fully Shipped — 正常</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="connector">▼ ▼ ▼</div>
+
+<!-- ═══════════════════════════════════════ -->
+<!-- PHASE 5 -->
+<!-- ═══════════════════════════════════════ -->
+<div class="phase p5">
+  <div class="phase-header">
+    <div class="phase-num">5</div>
+    <div class="phase-title">Output 输出</div>
+    <div class="phase-desc">Excel 明细 + HTML 交互 Dashboard</div>
+  </div>
+  <div class="cards">
+    <div class="card" style="flex:1;">
+      <div class="card-title">📊 Excel 明细表</div>
+      <div class="card-fields" style="line-height:2;">
+        <div><strong>Sheet 1: SO Master</strong> — 全量明细（状态/gap/风险/量）</div>
+        <div><strong>Sheet 2: Risk Summary</strong> — 按 Cluster × Plant 汇总</div>
+        <div><strong>Sheet 3: Gap Detail</strong> — In Production 的 SO，按 gap 排序</div>
+        <div><strong>Sheet 4: Action List</strong> — No Plan / Planned Only 待跟进</div>
+      </div>
+    </div>
+    <div class="card" style="flex:1;">
+      <div class="card-title">🖥️ HTML Interactive Dashboard</div>
+      <div class="card-fields" style="line-height:2;">
+        <div><strong>目标达成</strong> — 25,000吨 vs 当前进度（瀑布图）</div>
+        <div><strong>状态分布</strong> — by Plant 堆叠柱状图</div>
+        <div><strong>Gap 热力图</strong> — Loading Date vs Planned End Date</div>
+        <div><strong>风险清单</strong> — 可排序/筛选交互表格</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer-note">
+  <strong>🔑 核心关联键：SO 号（销售订单号）</strong> ｜
+  ⚠️ GR → SO 需经 PP 工单号中转 ｜
+  📅 月度复用：config.yaml 驱动，换月只需更新 Excel
+</div>
+
+</div>
+</body>
+</html>

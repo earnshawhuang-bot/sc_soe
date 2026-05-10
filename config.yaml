@@ -1,0 +1,26 @@
+# S&OE Monthly Configuration
+# Update these parameters each month before running
+
+month: "2026-05"
+target_mt: 25000
+data_date: "2026-05-08"  # Date when data was extracted (for time filter calculation)
+
+# Data file paths (relative to project root)
+data_root: "Order Fullfill Projection"
+
+files:
+  sc: "01-SC/Order tracking 0507.xlsx"
+  shipped: "02-Shipped/GI (KS&IDN) 260501-0507.xlsx"
+  fg: "03-FG/FG stock 050826.xlsx"
+  pp_scheduled:
+    - "04-PP/DAVIS日生产计划表.xlsx"
+    - "04-PP/SAM日生产计划表.xlsx"
+    - "04-PP/KS Ⅱ 日生产计划表.xlsx"
+    - "04-PP/IND Production Plan.xlsx"
+  pp_unscheduled: "04-PP/Global_PP_wo schedule.xlsx"
+  lp_ks: "06-Loading Plan/LoadingPlan_20260508.xlsx"
+  lp_idn_export: "06-Loading Plan/Schedule Planning Dispatch 260508.xlsx"
+  lp_idn_domestic: "06-Loading Plan/NEW DOMESTIC TRACKING 260508.xlsx"
+
+# Output directory
+output_dir: "output/2026-05"
