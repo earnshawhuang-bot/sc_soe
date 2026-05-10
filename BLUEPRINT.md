@@ -27,26 +27,34 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 
 **Filter**: Item column = "main"
 
-**Key columns**:
-| Column | Field | Usage |
-|--------|-------|-------|
-| L | SC NO | SO number (primary key) |
-| F | Supply From | Plant: Kunshan→KS, Indonesia→IDN |
-| D | Cluster | Region dimension |
-| AC | SC Vol.-MT | Order quantity (MT) |
-| K | Order Status | Classification input |
-| Q | Carryover | Empty = this month's billing |
-| AO | Carryover/Fresh | "Last Month" = Carry Over Unproduced |
-| I | Release Date | Month determination |
-| P | Loading Date | **NOT RELIABLE** - only as last resort |
+**Key columns** (use fixed column index positions — header names can shift):
+| Index | Letter | Field | Usage |
+|-------|--------|-------|-------|
+| 11 | L | SC NO | SO number (primary key) |
+| 5  | F | Supply From | Plant: Kunshan→KS, Indonesia→IDN |
+| 3  | D | Cluster | Region dimension |
+| 28 | AC | SC Vol.-MT | Order quantity (MT) |
+| 10 | K | Order Status | Classification input |
+| 16 | Q | Carryover | **Null** = this month's billing |
+| 40 | AO | carryover/fresh production | "last month" = Carry Over Unproduced |
+| 8  | I | RELEASE DATE | Month determination |
+| 15 | P | Loading Date | **NOT RELIABLE** — do not use as baseline |
 
 **Classification (4 types, independently verified MECE)**:
-1. **Carry Over Stock**: Order Status = "Carry Over" AND Q = empty
-2. **Carry Over Unproduced**: AO = "Last Month" AND Q = empty
-3. **Fresh Order This Month**: Release Date in current month AND Q = empty
+1. **Carry Over Stock**: K = `"Carryover"` AND Q is null
+2. **Carry Over Unproduced**: AO = `"last month"` AND Q is null
+3. **Fresh Order This Month**: Release Date in current month AND Q is null
 4. **Fresh Order Next Month**: Release Date in current month AND Q has value → **excluded from baseline**
 
 **Baseline** = Type 1 + Type 2 + Type 3
+
+**Aggregation**: One SO can appear on multiple rows (different SKUs). Aggregate by SO: `sc_vol_mt = SUM`, categorical fields = first.
+
+> ⚠️ **Pitfall**: K column value is `"Carryover"` (single word, capital C) — NOT `"carry over"` or `"Carry Over"`. Matching against the wrong string returns 0 rows for Carry Over Stock.
+
+> ⚠️ **Pitfall**: Q column (Carryover) holds a numeric pcs value when filled, not text. "Empty" means `pd.isna()` — do NOT check for empty string.
+
+> ⚠️ **Pitfall**: AO column header contains a newline: `"carryover/fresh\nproduction"`. Use index position (40) instead of name matching.
 
 ---
 
@@ -59,10 +67,14 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 |--------|-------|-------|
 | B | Post Date | Actual shipment date |
 | C | Plant | 3000/3001=KS, 3301=IDN |
-| Q | Sales Order | SO number (join key) |
+| Q (销售订单.1) | Sales Order | SO number (join key) |
 | S | Weight (KG) | × (-1) ÷ 1000 → MT |
 
 **Join**: Shipped.SO → SC.SO (direct match)
+
+> ⚠️ **Pitfall**: Two columns share the name "销售订单" (pandas deduplicates to `.1`). The correct one is `销售订单.1` (Q column), which holds 10-prefix SC numbers. `销售订单` (P column) holds internal order numbers starting with 8.
+
+> ⚠️ **Pitfall**: All SO numbers in Excel are stored as `float64` (e.g. `1000011733.0`). Must convert via `int(float(value))` before string matching — direct `.astype(str)` produces `"1000011733.0"` which fails regex match.
 
 ---
 
@@ -87,26 +99,26 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 ### 3.4 PP - Production Plan (04-PP)
 
 **Scheduled (4 files, unified structure)**:
-- `SAM日生产计划表.xlsx` (445 rows) — KS
-- `KS Ⅱ 日生产计划表.xlsx` (40 rows) — KS
-- `DAVIS日生产计划表.xlsx` (935 rows) — KS
-- `IND Production Plan.xlsx` (348 rows) — IDN
+- `SAM日生产计划表.xlsx` — KS
+- `KS Ⅱ 日生产计划表.xlsx` — KS
+- `DAVIS日生产计划表.xlsx` — KS
+- `IND Production Plan.xlsx` — IDN
 
 **Key columns**: Work Order No., SO, TotalWeight/T, PlannedFinishDate, Machine, Plant
 
 **Unscheduled (1 file)**:
-- `Global_PP_wo schedule.xlsx` (221 rows)
+- `Global_PP_wo schedule.xlsx`
 
 **Key columns**: Work Order No., SO, TotalWeight/T, Machine, Plant (**no date**)
 
 **Join**: PP.SO → SC.SO (direct match)
 
-**Multi-work-order aggregation** (common: one SO can have 20+ work orders across machines/files):
+**Multi-work-order aggregation** (one SO can have 20+ work orders across machines/files):
 - `wip_mt` = SUM of all work orders' TotalWeight under that SO
 - `planned_end_date` = MAX(PlannedFinishDate) across all work orders under that SO
   - Rationale: the SO cannot be loaded until ALL sub-batches are complete; latest date is the bottleneck
 
-**Significance**: MAX(PlannedFinishDate) is one side of the gap calculation.
+> ⚠️ **Pitfall**: PP SO numbers are also stored as `float64`. Same `int(float())` conversion required.
 
 ---
 
@@ -129,12 +141,12 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 - Underscore `_` = multi-SO separator
   - `1000012350_11631_11479` → 3 SOs: 1000012350, 1000011631, 1000011479
   - Short numbers inherit prefix from the longest number in the group
-- Dash `-` = container sequence within same SO (strip it)
+- Dash `-` = container sequence within same SO (strip suffix)
   - `1000012299-1` → SO: 1000012299
-- Combined: underscore first, then strip dash from each part
+- Combined: strip dash first, then split by underscore, then prefix-complete short numbers
 - Tonnage: after split, total MT evenly distributed across SOs
 
-**Time filter**: Loading Date >= (data_date - 3 days). E.g. data from May 8 → filter >= May 5
+**Time filter**: Loading Date >= (data_date − 3 days)
 
 **Join**: Split SO → SC.SO
 
@@ -142,7 +154,7 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 
 #### 3.5.2 IDN Export - Schedule Planning Dispatch
 
-**File**: `Schedule Planning Dispatch 260508.xlsx` → Sheet "ORDER OUTSTANDING"
+**File**: `Schedule Planning Dispatch 260508.xlsx` → Sheet `"ORDER OUTSTANDING "` *(trailing space in sheet name)*
 
 **Key columns**:
 | Column | Field | Usage |
@@ -155,15 +167,17 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 
 **Tonnage**: Cont Qty × corresponding MT per size
 
-**Time filter**: ELD >= (data_date - 3 days)
+**Time filter**: ELD >= (data_date − 3 days)
 
 **Join**: SC No. → SC.SO (direct match, 100% pure numbers)
+
+> ⚠️ **Pitfall**: Sheet name has a trailing space: `"ORDER OUTSTANDING "`. Must match exactly.
 
 ---
 
 #### 3.5.3 IDN Domestic - New Domestic Tracking
 
-**File**: `NEW DOMESTIC TRACKING 260508.xlsx` → Sheet "Order List"
+**File**: `NEW DOMESTIC TRACKING 260508.xlsx` → Sheet `"Order List"`, headers in **row 2**
 
 **Key columns**:
 | Column | Field | Usage |
@@ -172,16 +186,13 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 | G | ELD | **Required loading date (deadline)** |
 | P | Weight | Actual weight in MT |
 
-**INV NO. splitting rules** (for 10-prefixed orders only; non-10 prefix like `LMIDSAM*` → remove):
-- Comma `,` = multi-SO separator (43 entries)
-- Ampersand `&` = multi-SO separator (9 entries)
-- Dash `-` = batch/trip number, strip suffix, keep SO number before dash
-- Processing order: split by `,` or `&` first → then strip `-N` from each part
-- Tonnage after split: P column Weight evenly distributed across SOs (same as KS rule)
+**INV NO. splitting rules** (for 10-prefixed orders only; `LMIDSAM*` and other non-10 prefixes → discard):
+- Comma `,` or Ampersand `&` = multi-SO separator
+- Dash `-` = batch/trip number → strip suffix, keep SO number before dash
+- Processing order: split by `,` or `&` first → strip `-N` from each part
+- Tonnage: P column Weight evenly distributed across SOs after split
 
-**Example**: `1000007826-7, 1000008015-4` → split by comma → `1000007826-7` and `1000008015-4` → strip dash → SO `1000007826` and SO `1000008015` → Weight ÷ 2 each
-
-**Time filter**: ELD >= (data_date - 3 days)
+**Time filter**: ELD >= (data_date − 3 days)
 
 **Join**: Split SO → SC.SO
 
@@ -195,72 +206,87 @@ All joins converge on **SC.SO** as primary key.
 SC (baseline)
 ├── LEFT JOIN Shipped     → shipped_mt (per SO)
 ├── LEFT JOIN FG          → fg_mt (per SO, KS only)
-├── LEFT JOIN PP_sched    → planned_end_date, wip_mt
-├── LEFT JOIN PP_unsched  → has_work_order (no date)
+├── LEFT JOIN PP_sched    → planned_end_date, wip_mt, machines
+├── LEFT JOIN PP_unsched  → unsched_mt
 └── LEFT JOIN Loading Plan (KS + IDN Export + IDN Domestic)
-                          → required_loading_date, planned_load_mt
+                          → loading_date, load_mt, lp_source
 ```
 
-**Status assignment (quantity waterfall, not single label)**:
+**Status assignment (quantity waterfall — not a single label)**:
 
 Each SO gets a quantity breakdown:
 - `shipped_mt`: already shipped
 - `fg_mt`: in warehouse, ready to ship
-- `wip_mt`: in production (has planned_end_date)
-- `planned_mt`: has work order but no schedule
-- `no_plan_mt`: remainder (SC qty - all above)
+- `wip_mt`: in production with planned_end_date
+- `unsched_mt`: has work order but no date
+- `no_plan_mt`: remainder = SC qty − (all above), floored at 0
 
-**Primary status label** (based on largest unfulfilled portion):
-1. Shipped (fully or partially)
-2. In Stock (FG available)
-3. In Production - Scheduled (has planned_end_date)
-4. Planned - Unscheduled (has work order, no date)
-5. No Plan (nothing in PP)
+**Primary status label** (priority order):
+1. Shipped / Partially Shipped
+2. In Stock (FG > 0)
+3. In Production (wip_mt > 0, has planned_end_date)
+4. Planned (Unscheduled) (work order exists, no date)
+5. No Plan
 
 ---
 
 ## 5. Gap Calculation
 
 **Applies only to SOs with BOTH**:
-- A `planned_end_date` from PP (= MAX across all work orders for that SO)
-- A `required_loading_date` from Loading Plan (shipping side)
+- `planned_end_date` from PP (= MAX across all work orders for that SO)
+- `loading_date` from Loading Plan
 
 **Formula**:
 ```
-Gap (days) = Required_Loading_Date - (MAX(Planned_End_Date) + 1)
+Gap (days) = Loading_Date − (MAX(Planned_End_Date) + 1)
 ```
-
 - `+1 day`: production finish → next day = earliest warehouse receipt = earliest loadable
 
 **Interpretation**:
 - Gap > 2 → Green: buffer exists
-- Gap 0~2 → Yellow: tight but feasible
-- Gap < 0 → Red: production behind schedule, |gap| = days of delay
+- Gap 0–2 → Yellow: tight but feasible
+- Gap < 0 → Red: production behind, |gap| = days overdue
 
-**Risk tiers (for SOs WITHOUT a computable gap)**:
-- Has PP schedule but no Loading Plan entry → Orange: production moving, but no shipping arrangement
-- Has work order but no schedule (PP_unsched) → Red
-- No work order at all → Critical Red
+**Risk tiers for SOs without a computable gap**:
+- Has PP schedule but no Loading Plan entry → Orange
+- Has work order, no schedule date → Red
+- No work order at all → Critical
 
 ---
 
 ## 6. Output
 
-### Excel
-- Sheet 1: SO Master (full detail with status, quantities, gap, risk tier)
-- Sheet 2: Risk Summary (aggregated by Plant × Cluster)
-- Sheet 3: Gap Detail (only "In Production" SOs, sorted by gap ascending)
-- Sheet 4: No Plan / Unscheduled (action list)
+### Excel (4 sheets, consulting-style formatted)
+- **Summary**: Banner + KPI cards + Risk Distribution + **Plant × Region (Cluster) breakdown** + Order Type Breakdown
+- **SO Master**: Full detail per SO, sorted by risk, with conditional gap coloring and auto-filter
+- **Gap Analysis**: In-Production SOs only, sorted by gap ascending, gap cells color-coded
+- **Action Required**: No Plan + Unscheduled SOs, urgent red banner
 
-### HTML Dashboard
-- Progress: 25,000 MT target vs current status waterfall
-- Distribution: stacked bar by Plant (Shipped / FG / WIP / Planned / No Plan)
-- Gap view: timeline or table sorted by urgency
-- Filterable by Plant, Cluster, Machine
+### HTML Report (single-page narrative)
+- Section 1: Monthly overview — target vs progress waterfall bar
+- Section 2: Risk distribution table
+- Section 3: By Plant table
+- Section 4: Top 20 risk items
 
 ---
 
-## 7. Logical Closed Loop
+## 7. Management View Dimensions
+
+Management reviews across **three levels of granularity**:
+
+| Level | Dimension | Used for |
+|-------|-----------|---------|
+| L1 | Total | Monthly target vs actual headline |
+| L2 | Plant (KS / IDN) | Factory-level capacity and risk ownership |
+| L3 | Plant × Region (Cluster) | Customer segment delivery visibility |
+
+**Clusters observed in data**: CHINA, CIS, MEA, SEA, ISU, and others.
+
+The Summary sheet presents all three levels: total KPIs → by Plant → by Plant × Cluster.
+
+---
+
+## 8. Logical Closed Loop
 
 ```
         SC Baseline (what we OWE)
@@ -274,10 +300,25 @@ Gap (days) = Required_Loading_Date - (MAX(Planned_End_Date) + 1)
               Loading Plan (DEADLINE)
                          │
                          ▼
-                  Gap = Deadline - Production
+                  Gap = Deadline − Production
                          │
                          ▼
               Risk Signal → Action Required
 ```
 
-Every SO in the baseline must land in exactly ONE of these paths. No order is left unaccounted for. The waterfall quantities must sum back to SC Vol.-MT. This is the MECE closure.
+Every SO in the baseline lands in exactly ONE path. Waterfall quantities sum back to SC Vol.-MT. This is the MECE closure.
+
+---
+
+## 9. Known Pitfalls & Lessons Learned
+
+| # | Where | Issue | Fix |
+|---|-------|-------|-----|
+| 1 | SC K column | Value is `"Carryover"` not `"carry over"` — wrong string = 0 matches, entire Carry Over Stock category lost | Match exact string `"Carryover"` |
+| 2 | SC Q column | Holds numeric pcs value when filled; "empty" = `pd.isna()`, not empty string check | Use `.isna()` |
+| 3 | SC AO column | Header has embedded newline `\nproduction`; name-based search hits Q column first | Use fixed column index (40) |
+| 4 | SC rows | One SO can have multiple rows (different SKUs) — naively treating rows as SOs inflates count | Aggregate by SO: sum vol, first for categoricals |
+| 5 | All numeric IDs | SO/plant codes stored as `float64` in Excel (e.g. `1000011733.0`) — `.astype(str)` gives `"1000011733.0"`, breaks regex | Convert via `str(int(float(value)))` |
+| 6 | Shipped SO column | Two columns named "销售订单"; pandas deduplicates to `.1`; P column has internal order numbers, Q column (`.1`) has SC numbers | Prefer the column where values start with `"10"` |
+| 7 | IDN Dispatch sheet | Sheet name has trailing space: `"ORDER OUTSTANDING "` | Match with trailing space |
+| 8 | SC Loading Date (P) | Unreliable — values like "Pending" are common | Never use as fallback for gap calculation |

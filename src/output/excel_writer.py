@@ -189,6 +189,43 @@ def _sheet_summary(wb, master, month, target_mt):
             c.border = _border_thin()
         ws.row_dimensions[r].height = 20
 
+    # ── Plant × Region (Cluster) Breakdown ──
+    # start_row + 1 (section) + 1 (headers) + 3 (data) + 1 (spacer) = start_row + 6
+    pc_start = start_row + 6
+    ws.row_dimensions[pc_start - 1].height = 10  # spacer row before this section
+    _section_header(ws, row=pc_start, col=1, title="BY PLANT × REGION (CLUSTER)", span=9)
+    pc_headers = ["Plant", "Cluster", "SOs", "Baseline MT", "Shipped", "FG", "WIP", "Red+Critical", "% Fulfilled"]
+    _table_header(ws, row=pc_start+1, col=1, headers=pc_headers, widths=[10,12,8,14,12,10,10,14,12])
+
+    plant_cluster = master.groupby(["plant", "cluster"]).agg(
+        so_count=("so", "count"),
+        baseline_mt=("sc_vol_mt", "sum"),
+        shipped_mt=("shipped_mt", "sum"),
+        fg_mt=("fg_mt", "sum"),
+        wip_mt=("wip_mt", "sum"),
+        risk_red=("risk_tier", lambda x: x.isin(["Red", "Critical"]).sum()),
+    ).reset_index().sort_values(["plant", "cluster"])
+
+    last_plant = None
+    for i, (_, row) in enumerate(plant_cluster.iterrows()):
+        r = pc_start + 2 + i
+        fulfilled = row["shipped_mt"] + row["fg_mt"]
+        pct = f"{fulfilled / row['baseline_mt'] * 100:.1f}%" if row["baseline_mt"] > 0 else "—"
+        plant_label = row["plant"] if row["plant"] != last_plant else ""
+        last_plant = row["plant"]
+        vals = [plant_label, row["cluster"], row["so_count"],
+                round(row["baseline_mt"], 1), round(row["shipped_mt"], 1),
+                round(row["fg_mt"], 1), round(row["wip_mt"], 1),
+                row["risk_red"], pct]
+        bg = C_LIGHT_BLUE if plant_label else (C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY)
+        for j, val in enumerate(vals):
+            c = ws.cell(row=r, column=1+j, value=val)
+            c.fill = _fill(bg)
+            c.font = _font(bold=(j <= 1 and bool(plant_label)))
+            c.alignment = _align("center" if j > 1 else "left")
+            c.border = _border_thin()
+        ws.row_dimensions[r].height = 20
+
     # Column widths for summary sheet
     for col in range(1, 13):
         ws.column_dimensions[get_column_letter(col)].width = 14
