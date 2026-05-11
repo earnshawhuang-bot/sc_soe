@@ -1,5 +1,19 @@
 # Data files (too large / sensitive)
-Order Fullfill Projection/
+Order Fullfill Projection/**
+!Order Fullfill Projection/
+!Order Fullfill Projection/README.md
+!Order Fullfill Projection/01-SC/
+!Order Fullfill Projection/01-SC/.gitkeep
+!Order Fullfill Projection/02-Shipped/
+!Order Fullfill Projection/02-Shipped/.gitkeep
+!Order Fullfill Projection/03-FG/
+!Order Fullfill Projection/03-FG/.gitkeep
+!Order Fullfill Projection/04-PP/
+!Order Fullfill Projection/04-PP/.gitkeep
+!Order Fullfill Projection/06-Loading Plan/
+!Order Fullfill Projection/06-Loading Plan/.gitkeep
+!Order Fullfill Projection/07-Mapping/
+!Order Fullfill Projection/07-Mapping/.gitkeep
 /output/
 
 # Python
