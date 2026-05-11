@@ -84,7 +84,7 @@ def write_html_report(master: pd.DataFrame, output_dir: str, month: str, target_
             <div class="kpi green"><div class="value">{metrics['shipped']:,.0f}</div><div class="label">Shipped (MT)</div></div>
             <div class="kpi green"><div class="value">{metrics['fg']:,.0f}</div><div class="label">In Stock (MT)</div></div>
             <div class="kpi yellow"><div class="value">{metrics['wip']:,.0f}</div><div class="label">In Production (MT)</div></div>
-            <div class="kpi red"><div class="value">{metrics['at_risk']:,.0f}</div><div class="label">At Risk (MT)</div></div>
+            <div class="kpi red"><div class="value">{metrics['at_risk']:,.0f}</div><div class="label">Scheduling (MT)</div></div>
         </div>
         <!-- Waterfall bar -->
         <div class="waterfall">

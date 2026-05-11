@@ -107,7 +107,7 @@ def main():
     print(f"  Shipped:   {master['allocated_shipped_mt'].sum():>10,.0f} MT")
     print(f"  In Stock:  {master['allocated_fg_mt'].sum():>10,.0f} MT")
     print(f"  WIP:       {master['allocated_wip_mt'].sum():>10,.0f} MT")
-    print(f"  At Risk:   {(master['allocated_unsched_mt'].sum() + master['allocated_no_plan_mt'].sum()):>10,.0f} MT")
+    print(f"  Scheduling:{(master['allocated_unsched_mt'].sum() + master['allocated_no_plan_mt'].sum()):>10,.0f} MT")
     print()
     risk_counts = master["risk_tier"].value_counts()
     for tier in ["Green", "Yellow", "Orange", "Red", "Critical"]:

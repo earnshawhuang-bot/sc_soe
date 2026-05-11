@@ -310,17 +310,44 @@ Gap (days) = Loading_Date − (MAX(Planned_End_Date) + 1)
 - Has work order, no schedule date → Red
 - No work order at all → Critical
 
+**Risk tier logic used in the Summary sheet**:
+| Risk Tier | Trigger |
+|-----------|---------|
+| Green | Fully shipped, or in production with gap > 2 days |
+| Yellow | In stock / partial shipped, or in production with gap 0-2 days |
+| Orange | Allocated WIP exists but no loading plan date |
+| Red | Allocated unscheduled work order exists, or production gap < 0 |
+| Critical | Allocated no-plan quantity remains after shipped, FG, WIP, and unscheduled |
+
+`Red+Critical MT` in Summary tables is the adjusted baseline volume of SOs whose final `risk_tier` is Red or Critical. It is not an SO count, and it is not simply `Unscheduled + No Plan`; Red can also include scheduled WIP with a negative production gap.
+
 ---
 
 ## 6. Output
 
-### Excel (v2 sheets, consulting-style formatted)
-- **Summary**: Banner + KPI cards + Risk Distribution + **Plant × Region (Cluster) breakdown** + Order Type Breakdown
+### Excel (v7 sheets, consulting-style formatted)
+- **Summary**: Banner + KPI cards + Risk Distribution + By Plant + Risk Tier Logic + Order Type Breakdown + **Plant × Region (Cluster) breakdown**
 - **SO Master**: Full detail per SO, including adjusted baseline, SC prior-month delivery pre-allocation, raw source quantities, allocated waterfall quantities, gap, and risk
 - **Gap Analysis**: In-Production SOs only, sorted by gap ascending, gap cells color-coded
 - **Action Required**: No Plan + Unscheduled SOs, urgent red banner
 - **Overlap Audit**: SOs where raw source quantities exceed adjusted baseline; used for explanation, not management KPI
 - **SC Row Detail / SC Fresh Next Month / SC Unknown Type / Unmatched End Customer**: SC baseline audit sheets
+
+**Summary sheet presentation rules**:
+- All volume metrics are MT, shown with thousands separators and no decimals.
+- SO counts are intentionally not shown in the Summary tables; the management view is volume-driven.
+- KPI cards:
+  - `BASELINE ORDERS` = adjusted SC baseline volume
+  - `SHIPPED` = allocated shipped volume, including SC prior-month delivery pre-allocation and normal GI shipped
+  - `IN STOCK (FG)` = allocated FG volume
+  - `IN PRODUCTION` = allocated WIP volume
+  - `SCHEDULING` = allocated unscheduled + allocated no-plan volume
+- Risk Distribution columns: `Risk Tier`, `Volume (MT)`, `% of Baseline`.
+- By Plant columns: `Plant`, `Baseline MT`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`, `Red+Critical MT`.
+- Order Type Breakdown columns: `Order Type`, `Volume (MT)`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`.
+- By Plant × Region (Cluster) columns: `Plant`, `Cluster`, `Baseline MT`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`, `Red+Critical MT`, `% Fulfilled`.
+- By Plant × Region includes plant-level `TOTAL` rows before cluster-level detail rows.
+- `% Fulfilled` = `(Shipped + FG) / Baseline MT`; WIP, Unscheduled, and No Plan remain future fulfillment exposure.
 
 ### HTML Report (single-page narrative)
 - Section 1: Monthly overview — target vs progress waterfall bar

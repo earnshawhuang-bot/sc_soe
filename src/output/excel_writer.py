@@ -94,6 +94,11 @@ def write_excel(
 def _sheet_summary(wb, master, month, target_mt):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
+    master = master.copy()
+    master["red_critical_mt"] = master.apply(
+        lambda row: row["sc_vol_mt"] if row["risk_tier"] in ["Red", "Critical"] else 0,
+        axis=1,
+    )
 
     # ── Title banner ──
     ws.merge_cells("A1:J1")
@@ -117,15 +122,15 @@ def _sheet_summary(wb, master, month, target_mt):
     # ── KPI cards (row 4-8) ──
     _kpi_header(ws, row=4)
     kpis = [
-        ("BASELINE ORDERS", f"{master['sc_vol_mt'].sum():,.0f} MT", f"{len(master)} SOs", C_DARK_BLUE),
+        ("BASELINE ORDERS", f"{master['sc_vol_mt'].sum():,.0f} MT", "Adjusted baseline", C_DARK_BLUE),
         ("SHIPPED",         f"{master['allocated_shipped_mt'].sum():,.0f} MT",
-                            f"{(master['status']=='Shipped').sum() + (master['status']=='Partially Shipped').sum()} SOs", C_GREEN_FG),
+                            "Allocated shipped", C_GREEN_FG),
         ("IN STOCK (FG)",   f"{master['allocated_fg_mt'].sum():,.0f} MT",
-                            f"{(master['status']=='In Stock').sum()} SOs", "2E7D32"),
+                            "Allocated FG", "2E7D32"),
         ("IN PRODUCTION",   f"{master['allocated_wip_mt'].sum():,.0f} MT",
-                            f"{(master['status']=='In Production').sum()} SOs", C_YELLOW_FG),
-        ("AT RISK",         f"{(master['allocated_unsched_mt']+master['allocated_no_plan_mt']).sum():,.0f} MT",
-                            f"{master['status'].isin(['Planned (Unscheduled)','No Plan']).sum()} SOs", C_RED_FG),
+                            "Allocated WIP", C_YELLOW_FG),
+        ("SCHEDULING",      f"{(master['allocated_unsched_mt']+master['allocated_no_plan_mt']).sum():,.0f} MT",
+                            "Unscheduled + no plan", C_RED_FG),
     ]
     col_starts = [1, 3, 5, 7, 9]
     for (label, val, sub, color), col in zip(kpis, col_starts):
@@ -135,14 +140,14 @@ def _sheet_summary(wb, master, month, target_mt):
 
     # ── Risk Distribution table (row 11+) ──
     _section_header(ws, row=11, col=1, title="RISK DISTRIBUTION", span=4)
-    risk_headers = ["Risk Tier", "SOs", "Volume (MT)", "% of Baseline"]
+    risk_headers = ["Risk Tier", "Volume (MT)", "% of Baseline"]
     _table_header(ws, row=12, col=1, headers=risk_headers, widths=[18, 8, 16, 16])
     baseline_mt = master["sc_vol_mt"].sum() or 1
     risk_order = ["Green", "Yellow", "Orange", "Red", "Critical"]
     for i, tier in enumerate(risk_order):
         sub = master[master["risk_tier"] == tier]
         vol = sub["sc_vol_mt"].sum()
-        row_data = [tier, len(sub), round(vol, 1), f"{vol/baseline_mt*100:.1f}%"]
+        row_data = [tier, vol, f"{vol/baseline_mt*100:.0f}%"]
         r = 13 + i
         fill_c, font_c = RISK_STYLE.get(tier, (_fill(C_OFF_WHITE), _font()))
         for j, val in enumerate(row_data):
@@ -155,21 +160,24 @@ def _sheet_summary(wb, master, month, target_mt):
 
     # ── Plant Breakdown table ──
     _section_header(ws, row=11, col=6, title="BY PLANT", span=5)
-    plant_headers = ["Plant", "SOs", "Baseline MT", "Shipped", "FG", "WIP", "Red+Critical"]
-    _table_header(ws, row=12, col=6, headers=plant_headers, widths=[10, 8, 14, 12, 10, 10, 14])
+    plant_headers = ["Plant", "Baseline MT", "Shipped", "FG", "WIP", "Unscheduled", "No Plan", "Red+Critical MT"]
+    _table_header(ws, row=12, col=6, headers=plant_headers, widths=[10, 14, 12, 10, 10, 14, 12, 14])
     plants = master.groupby("plant").agg(
-        so_count=("so", "count"),
         baseline_mt=("sc_vol_mt", "sum"),
         shipped_mt=("shipped_mt", "sum"),
         fg_mt=("fg_mt", "sum"),
         wip_mt=("wip_mt", "sum"),
-        risk_red=("risk_tier", lambda x: x.isin(["Red","Critical"]).sum())
+        unsched_mt=("unsched_mt", "sum"),
+        no_plan_mt=("no_plan_mt", "sum"),
+        risk_red_mt=("red_critical_mt", "sum"),
     ).reset_index()
     for i, (_, row) in enumerate(plants.iterrows()):
         r = 13 + i
-        vals = [row["plant"], row["so_count"], round(row["baseline_mt"],1),
-                round(row["shipped_mt"],1), round(row["fg_mt"],1),
-                round(row["wip_mt"],1), row["risk_red"]]
+        vals = [row["plant"], row["baseline_mt"],
+                row["shipped_mt"], row["fg_mt"],
+                row["wip_mt"], row["unsched_mt"],
+                row["no_plan_mt"],
+                row["risk_red_mt"]]
         bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
         for j, val in enumerate(vals):
             c = ws.cell(row=r, column=6 + j, value=val)
@@ -179,22 +187,40 @@ def _sheet_summary(wb, master, month, target_mt):
             c.border = _border_thin()
         ws.row_dimensions[r].height = 20
 
-    # ── Order Type Breakdown ──
-    start_row = 11 + 5 + 4
-    _section_header(ws, row=start_row, col=1, title="ORDER TYPE BREAKDOWN", span=9)
-    ot_headers = ["Order Type", "SOs", "Volume (MT)", "Shipped", "FG", "WIP", "Unscheduled", "No Plan"]
-    _table_header(ws, row=start_row+1, col=1, headers=ot_headers, widths=[28,8,14,12,10,10,14,12])
-    order_type_fields = [
-        ("Carry Over Stock", "carry_over_stock_mt"),
-        ("Carry Over Unproduced", "carry_over_unproduced_mt"),
-        ("Fresh Order This Month", "fresh_this_month_mt"),
+    # ── Risk Tier Logic ──
+    logic_start = 20
+    _section_header(ws, row=logic_start, col=6, title="RISK TIER LOGIC", span=6)
+    _table_header(ws, row=logic_start+1, col=6, headers=["Risk Tier", "Trigger"], widths=[14, 72])
+    logic_rows = [
+        ("Green", "Fully shipped, or in production with gap > 2 days"),
+        ("Yellow", "In stock / partial shipped, or in production with gap 0-2 days"),
+        ("Orange", "Allocated WIP exists but no loading plan date"),
+        ("Red", "Allocated unscheduled work order exists, or production gap < 0"),
+        ("Critical", "Allocated no-plan quantity remains after shipped, FG, WIP, and unscheduled"),
     ]
-    for i, (ot, vol_field) in enumerate(order_type_fields):
-        sub = master[master[vol_field] > 0] if vol_field in master.columns else master[master["order_type"] == ot]
-        vals = [ot, len(sub), round(sub[vol_field].sum() if vol_field in sub.columns else sub["sc_vol_mt"].sum(),1),
-                round(sub["shipped_mt"].sum(),1), round(sub["fg_mt"].sum(),1),
-                round(sub["wip_mt"].sum(),1), round(sub["unsched_mt"].sum(),1),
-                round(sub["no_plan_mt"].sum(),1)]
+    for i, (tier, trigger) in enumerate(logic_rows):
+        r = logic_start + 2 + i
+        fill_c, font_c = RISK_STYLE.get(tier, (_fill(C_OFF_WHITE), _font()))
+        for j, val in enumerate([tier, trigger]):
+            c = ws.cell(row=r, column=6+j, value=val)
+            c.fill = fill_c if j == 0 else _fill(C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY)
+            c.font = font_c if j == 0 else _font(size=9)
+            c.alignment = _align("left", wrap=(j == 1))
+            c.border = _border_thin()
+        ws.row_dimensions[r].height = 22
+
+    # ── Order Type Breakdown ──
+    start_row = 29
+    _section_header(ws, row=start_row, col=1, title="ORDER TYPE BREAKDOWN", span=9)
+    ot_headers = ["Order Type", "Volume (MT)", "Shipped", "FG", "WIP", "Unscheduled", "No Plan"]
+    _table_header(ws, row=start_row+1, col=1, headers=ot_headers, widths=[28,14,12,10,10,14,12])
+    for i, row in enumerate(_build_order_type_breakdown(master)):
+        vals = [
+            row["order_type"], row["volume_mt"],
+            row["shipped_mt"], row["fg_mt"],
+            row["wip_mt"], row["unsched_mt"],
+            row["no_plan_mt"],
+        ]
         r = start_row + 2 + i
         bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
         for j, val in enumerate(vals):
@@ -210,34 +236,50 @@ def _sheet_summary(wb, master, month, target_mt):
     pc_start = start_row + 6
     ws.row_dimensions[pc_start - 1].height = 10  # spacer row before this section
     _section_header(ws, row=pc_start, col=1, title="BY PLANT × REGION (CLUSTER)", span=9)
-    pc_headers = ["Plant", "Cluster", "SOs", "Baseline MT", "Shipped", "FG", "WIP", "Red+Critical", "% Fulfilled"]
-    _table_header(ws, row=pc_start+1, col=1, headers=pc_headers, widths=[10,12,8,14,12,10,10,14,12])
+    pc_headers = ["Plant", "Cluster", "Baseline MT", "Shipped", "FG", "WIP", "Unscheduled", "No Plan", "Red+Critical MT", "% Fulfilled"]
+    _table_header(ws, row=pc_start+1, col=1, headers=pc_headers, widths=[10,12,14,12,10,10,14,12,14,12])
 
-    plant_cluster = master.groupby(["plant", "cluster"]).agg(
-        so_count=("so", "count"),
+    plant_cluster_detail = master.groupby(["plant", "cluster"]).agg(
         baseline_mt=("sc_vol_mt", "sum"),
         shipped_mt=("shipped_mt", "sum"),
         fg_mt=("fg_mt", "sum"),
         wip_mt=("wip_mt", "sum"),
-        risk_red=("risk_tier", lambda x: x.isin(["Red", "Critical"]).sum()),
+        unsched_mt=("unsched_mt", "sum"),
+        no_plan_mt=("no_plan_mt", "sum"),
+        risk_red_mt=("red_critical_mt", "sum"),
     ).reset_index().sort_values(["plant", "cluster"])
+    plant_totals = master.groupby("plant").agg(
+        baseline_mt=("sc_vol_mt", "sum"),
+        shipped_mt=("shipped_mt", "sum"),
+        fg_mt=("fg_mt", "sum"),
+        wip_mt=("wip_mt", "sum"),
+        unsched_mt=("unsched_mt", "sum"),
+        no_plan_mt=("no_plan_mt", "sum"),
+        risk_red_mt=("red_critical_mt", "sum"),
+    ).reset_index()
+    plant_totals["cluster"] = "TOTAL"
+    plant_cluster = pd.concat([plant_totals, plant_cluster_detail], ignore_index=True)
+    plant_cluster["_cluster_sort"] = plant_cluster["cluster"].apply(lambda x: "" if x == "TOTAL" else str(x))
+    plant_cluster = plant_cluster.sort_values(["plant", "_cluster_sort"]).drop(columns=["_cluster_sort"])
 
     last_plant = None
     for i, (_, row) in enumerate(plant_cluster.iterrows()):
         r = pc_start + 2 + i
         fulfilled = row["shipped_mt"] + row["fg_mt"]
-        pct = f"{fulfilled / row['baseline_mt'] * 100:.1f}%" if row["baseline_mt"] > 0 else "—"
+        pct = f"{fulfilled / row['baseline_mt'] * 100:.0f}%" if row["baseline_mt"] > 0 else "—"
         plant_label = row["plant"] if row["plant"] != last_plant else ""
         last_plant = row["plant"]
-        vals = [plant_label, row["cluster"], row["so_count"],
-                round(row["baseline_mt"], 1), round(row["shipped_mt"], 1),
-                round(row["fg_mt"], 1), round(row["wip_mt"], 1),
-                row["risk_red"], pct]
-        bg = C_LIGHT_BLUE if plant_label else (C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY)
+        vals = [plant_label, row["cluster"],
+                row["baseline_mt"], row["shipped_mt"],
+                row["fg_mt"], row["wip_mt"],
+                row["unsched_mt"],
+                row["no_plan_mt"],
+                row["risk_red_mt"], pct]
+        bg = C_LIGHT_BLUE if row["cluster"] == "TOTAL" else (C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY)
         for j, val in enumerate(vals):
             c = ws.cell(row=r, column=1+j, value=val)
             c.fill = _fill(bg)
-            c.font = _font(bold=(j <= 1 and bool(plant_label)))
+            c.font = _font(bold=(row["cluster"] == "TOTAL" or (j <= 1 and bool(plant_label))))
             c.alignment = _align("center" if j > 1 else "left")
             c.border = _border_thin()
         ws.row_dimensions[r].height = 20
@@ -245,6 +287,50 @@ def _sheet_summary(wb, master, month, target_mt):
     # Column widths for summary sheet
     for col in range(1, 13):
         ws.column_dimensions[get_column_letter(col)].width = 14
+    _format_summary_numbers(ws)
+
+
+def _format_summary_numbers(ws):
+    """Show Summary numeric values as thousands-formatted integers."""
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0'
+
+
+def _build_order_type_breakdown(master):
+    """Allocate SO-level waterfall quantities to row-level order types by volume share."""
+    order_type_fields = [
+        ("Carry Over Stock", "carry_over_stock_mt"),
+        ("Carry Over Unproduced", "carry_over_unproduced_mt"),
+        ("Fresh Order This Month", "fresh_this_month_mt"),
+    ]
+    allocated_fields = {
+        "shipped_mt": "allocated_shipped_mt",
+        "fg_mt": "allocated_fg_mt",
+        "wip_mt": "allocated_wip_mt",
+        "unsched_mt": "allocated_unsched_mt",
+        "no_plan_mt": "allocated_no_plan_mt",
+    }
+    rows = []
+    for order_type, vol_field in order_type_fields:
+        if vol_field not in master.columns:
+            rows.append({
+                "order_type": order_type, "so_count": 0, "volume_mt": 0,
+                "shipped_mt": 0, "fg_mt": 0, "wip_mt": 0, "unsched_mt": 0, "no_plan_mt": 0,
+            })
+            continue
+        type_volume = master[vol_field].fillna(0)
+        share = (type_volume / master["sc_vol_mt"].replace(0, pd.NA)).fillna(0)
+        row = {
+            "order_type": order_type,
+            "so_count": int((type_volume > 0).sum()),
+            "volume_mt": type_volume.sum(),
+        }
+        for output_field, source_field in allocated_fields.items():
+            row[output_field] = (master[source_field] * share).sum()
+        rows.append(row)
+    return rows
 
 
 # ── Sheet 2: SO Master ─────────────────────────────────────────────────────

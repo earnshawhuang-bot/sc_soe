@@ -25,4 +25,4 @@ files:
 
 # Output directory
 output_dir: "output/2026-05-11-v2"
-excel_version_suffix: "v3"
+excel_version_suffix: "v7"
