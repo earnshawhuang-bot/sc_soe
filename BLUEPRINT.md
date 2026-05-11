@@ -23,38 +23,70 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 
 ### 3.1 SC - Sales Order Baseline (01-SC)
 
-**File**: `Order tracking 0507.xlsx` → Sheet "Order Status - Main"
+**File**: monthly `Order tracking *.xlsx` → Sheet "Order Status - Main"
 
 **Filter**: Item column = "main"
 
-**Key columns** (use fixed column index positions — header names can shift):
-| Index | Letter | Field | Usage |
-|-------|--------|-------|-------|
-| 11 | L | SC NO | SO number (primary key) |
-| 5  | F | Supply From | Plant: Kunshan→KS, Indonesia→IDN |
-| 3  | D | Cluster | Region dimension |
-| 28 | AC | SC Vol.-MT | Order quantity (MT) |
-| 10 | K | Order Status | Classification input |
-| 16 | Q | Carryover | **Null** = this month's billing |
-| 40 | AO | carryover/fresh production | "last month" = Carry Over Unproduced |
-| 8  | I | RELEASE DATE | Month determination |
-| 15 | P | Loading Date | **NOT RELIABLE** — do not use as baseline |
+**Key columns** (use normalized header lookup; column positions can shift month to month):
+| Field | Usage |
+|-------|-------|
+| SC NO | SO number (primary key) |
+| Supply From | Plant: Kunshan→KS, Indonesia→IDN |
+| Cluster | Region dimension |
+| End User Cust ID | Customer mapping validation |
+| SC Vol.-MT | Raw order quantity (MT) |
+| Order Status | Classification input |
+| Carryover | **Null** = this month's billing |
+| carryover/fresh production | "last month" = Carry Over Unproduced |
+| RELEASE DATE | Month determination |
+| Delivery PCS | SC-side delivery signal; negative rows are excluded from prior-month delivery pre-allocation |
+| Loading Date | SC-side loading date; not used as the required loading deadline |
+
+**Customer mapping validation**:
+- File: `07-Mapping/dim_cc_region.xlsx`
+- Sheet: `dim->new cc`
+- Join: `SC.End User Cust ID` → `dim->new cc.new customer code`
+- End customer unmatched rows are excluded from the main baseline and stored in the `Unmatched End Customer` audit sheet.
+- `Material Code` mapping is not used as a baseline filter in v2.
 
 **Classification (4 types, independently verified MECE)**:
-1. **Carry Over Stock**: K = `"Carryover"` AND Q is null
-2. **Carry Over Unproduced**: AO = `"last month"` AND Q is null
+1. **Carry Over Stock**: Order Status = `"Carryover"` AND Carryover is null
+2. **Carry Over Unproduced**: carryover/fresh production = `"last month"` AND Carryover is null
 3. **Fresh Order This Month**: Release Date in current month AND Q is null
 4. **Fresh Order Next Month**: Release Date in current month AND Q has value → **excluded from baseline**
 
-**Baseline** = Type 1 + Type 2 + Type 3
+**Business adjustment factor**:
+| Order Type | Adjusted baseline volume |
+|------------|--------------------------|
+| Carry Over Stock | `SC Vol.-MT` |
+| Carry Over Unproduced | `SC Vol.-MT × 0.975` |
+| Fresh Order This Month | `SC Vol.-MT × 0.975` |
+| Fresh Order Next Month | `SC Vol.-MT × 0.975` for next-month visibility only; excluded from current baseline |
 
-**Aggregation**: One SO can appear on multiple rows (different SKUs). Aggregate by SO: `sc_vol_mt = SUM`, categorical fields = first.
+**Baseline** = Carry Over Stock + adjusted Carry Over Unproduced + adjusted Fresh Order This Month.
+
+**Aggregation**: Classify and adjust at SC row level first, then aggregate to SO. Preserve type-specific adjusted columns (`carry_over_stock_mt`, `carry_over_unproduced_mt`, `fresh_this_month_mt`) so mixed-type SOs do not get misallocated to the first row's type.
+
+**SC prior-month delivery pre-allocation**:
+- Build a separate SC-derived delivery DataFrame from the same `Order Status - Main` rows.
+- Date window: previous calendar month relative to the run `data_date`.
+  - Example: if `data_date = 2026-05-11`, use `2026-04-01` through `2026-04-30`.
+- Filter:
+  - `Item = main`
+  - `Loading Date` falls in the previous-month window
+  - `Delivery PCS` is not negative; negative delivery rows are removed
+  - End customer mapping passes the same `End User Cust ID` validation
+- Quantity:
+  - Use `SC Vol.-MT` as the delivery volume field.
+- Purpose:
+  - This SC-derived quantity is treated as already fulfilled and is allocated into `Allocated Shipped` before normal 02-Shipped GI data.
+  - It is an internal SC pre-allocation signal; it does not replace 02-Shipped.
 
 > ⚠️ **Pitfall**: K column value is `"Carryover"` (single word, capital C) — NOT `"carry over"` or `"Carry Over"`. Matching against the wrong string returns 0 rows for Carry Over Stock.
 
 > ⚠️ **Pitfall**: Q column (Carryover) holds a numeric pcs value when filled, not text. "Empty" means `pd.isna()` — do NOT check for empty string.
 
-> ⚠️ **Pitfall**: AO column header contains a newline: `"carryover/fresh\nproduction"`. Use index position (40) instead of name matching.
+> ⚠️ **Pitfall**: AO column header contains a newline: `"carryover/fresh\nproduction"`. Normalize header names instead of relying on either fixed position or exact raw text.
 
 ---
 
@@ -212,21 +244,47 @@ SC (baseline)
                           → loading_date, load_mt, lp_source
 ```
 
-**Status assignment (quantity waterfall — not a single label)**:
+**Status assignment uses a mutually exclusive quantity waterfall**.
 
-Each SO gets a quantity breakdown:
-- `shipped_mt`: already shipped
-- `fg_mt`: in warehouse, ready to ship
-- `wip_mt`: in production with planned_end_date
-- `unsched_mt`: has work order but no date
-- `no_plan_mt`: remainder = SC qty − (all above), floored at 0
+Raw source quantities are preserved as `raw_sc_prior_delivery_mt`, `raw_shipped_mt`, `raw_fg_mt`, `raw_wip_mt`, and `raw_unsched_mt`. Management KPIs and status use allocated quantities:
 
-**Primary status label** (priority order):
-1. Shipped / Partially Shipped
-2. In Stock (FG > 0)
-3. In Production (wip_mt > 0, has planned_end_date)
-4. Planned (Unscheduled) (work order exists, no date)
-5. No Plan
+```
+allocated_sc_prior_shipped = min(raw_sc_prior_delivery, adjusted_sc_vol)
+remaining_0                = adjusted_sc_vol - allocated_sc_prior_shipped
+
+allocated_shipped = min(raw_shipped, remaining_0)
+remaining_1       = remaining_0 - allocated_shipped
+
+allocated_fg      = min(raw_fg, remaining_1)
+remaining_2       = remaining_1 - allocated_fg
+
+allocated_wip     = min(raw_wip, remaining_2)
+remaining_3       = remaining_2 - allocated_wip
+
+allocated_unsched = min(raw_unsched, remaining_3)
+allocated_no_plan = remaining_3 - allocated_unsched
+```
+
+This guarantees:
+
+```
+allocated_sc_prior_shipped
++ allocated_shipped
++ allocated_fg
++ allocated_wip
++ allocated_unsched
++ allocated_no_plan
+= adjusted SC baseline
+```
+
+`Allocated Shipped` in management reporting equals `allocated_sc_prior_shipped + allocated_shipped`. The split is retained in SO Master so users can distinguish SC prior-month delivery pre-allocation from normal GI shipped data.
+
+**Primary status label** follows the most severe remaining allocated segment:
+1. `allocated_no_plan > 0` → No Plan
+2. `allocated_unsched > 0` → Planned (Unscheduled)
+3. `allocated_wip > 0` → In Production
+4. `allocated_fg > 0` → In Stock
+5. fully shipped → Shipped
 
 ---
 
@@ -256,11 +314,13 @@ Gap (days) = Loading_Date − (MAX(Planned_End_Date) + 1)
 
 ## 6. Output
 
-### Excel (4 sheets, consulting-style formatted)
+### Excel (v2 sheets, consulting-style formatted)
 - **Summary**: Banner + KPI cards + Risk Distribution + **Plant × Region (Cluster) breakdown** + Order Type Breakdown
-- **SO Master**: Full detail per SO, sorted by risk, with conditional gap coloring and auto-filter
+- **SO Master**: Full detail per SO, including adjusted baseline, SC prior-month delivery pre-allocation, raw source quantities, allocated waterfall quantities, gap, and risk
 - **Gap Analysis**: In-Production SOs only, sorted by gap ascending, gap cells color-coded
 - **Action Required**: No Plan + Unscheduled SOs, urgent red banner
+- **Overlap Audit**: SOs where raw source quantities exceed adjusted baseline; used for explanation, not management KPI
+- **SC Row Detail / SC Fresh Next Month / SC Unknown Type / Unmatched End Customer**: SC baseline audit sheets
 
 ### HTML Report (single-page narrative)
 - Section 1: Monthly overview — target vs progress waterfall bar
@@ -306,7 +366,7 @@ The Summary sheet presents all three levels: total KPIs → by Plant → by Plan
               Risk Signal → Action Required
 ```
 
-Every SO in the baseline lands in exactly ONE path. Waterfall quantities sum back to SC Vol.-MT. This is the MECE closure.
+Every SO in the baseline can have multiple raw source signals, but the allocated waterfall is mutually exclusive and sums back to adjusted SC baseline. This is the MECE closure used for management KPIs.
 
 ---
 
@@ -316,9 +376,11 @@ Every SO in the baseline lands in exactly ONE path. Waterfall quantities sum bac
 |---|-------|-------|-----|
 | 1 | SC K column | Value is `"Carryover"` not `"carry over"` — wrong string = 0 matches, entire Carry Over Stock category lost | Match exact string `"Carryover"` |
 | 2 | SC Q column | Holds numeric pcs value when filled; "empty" = `pd.isna()`, not empty string check | Use `.isna()` |
-| 3 | SC AO column | Header has embedded newline `\nproduction`; name-based search hits Q column first | Use fixed column index (40) |
-| 4 | SC rows | One SO can have multiple rows (different SKUs) — naively treating rows as SOs inflates count | Aggregate by SO: sum vol, first for categoricals |
+| 3 | SC AO column | Header has embedded newline `\nproduction`; exact-name lookup and fixed positions can both drift | Normalize headers and match semantically |
+| 4 | SC rows | One SO can have multiple rows and even multiple order types | Classify/adjust at row level, then aggregate to SO with type-specific columns |
 | 5 | All numeric IDs | SO/plant codes stored as `float64` in Excel (e.g. `1000011733.0`) — `.astype(str)` gives `"1000011733.0"`, breaks regex | Convert via `str(int(float(value)))` |
 | 6 | Shipped SO column | Two columns named "销售订单"; pandas deduplicates to `.1`; P column has internal order numbers, Q column (`.1`) has SC numbers | Prefer the column where values start with `"10"` |
 | 7 | IDN Dispatch sheet | Sheet name has trailing space: `"ORDER OUTSTANDING "` | Match with trailing space |
-| 8 | SC Loading Date (P) | Unreliable — values like "Pending" are common | Never use as fallback for gap calculation |
+| 8 | SC Loading Date (P) | Not reliable as a required loading deadline, but useful for the SC prior-month delivery pre-allocation window | Never use as fallback for gap calculation; only use for the explicit previous-month SC delivery filter |
+| 9 | Raw source overlap | Same SO can appear in Shipped, FG, and PP simultaneously, causing raw sums to exceed baseline | Use allocated waterfall for KPIs; keep raw quantities in Overlap Audit |
+| 10 | SC Delivery PCS | Negative delivery PCS rows reverse/correct delivery signals | Exclude negative Delivery PCS rows from SC prior-month delivery pre-allocation |

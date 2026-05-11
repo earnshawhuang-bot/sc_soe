@@ -21,15 +21,42 @@ def assign_status_and_gap(master: pd.DataFrame) -> pd.DataFrame:
     """
     df = master.copy()
 
-    # --- Quantity waterfall ---
-    # no_plan_mt = sc_vol - shipped - fg - wip - unsched (floored at 0)
-    df["no_plan_mt"] = (
-        df["sc_vol_mt"]
-        - df["shipped_mt"]
-        - df["fg_mt"]
-        - df["wip_mt"]
-        - df["unsched_mt"]
-    ).clip(lower=0)
+    # Preserve raw source quantities, then build a mutually exclusive
+    # waterfall for management reporting and risk classification.
+    if "raw_sc_prior_delivery_mt" not in df.columns:
+        df["raw_sc_prior_delivery_mt"] = 0
+    df["raw_sc_prior_delivery_mt"] = df["raw_sc_prior_delivery_mt"].fillna(0)
+    df["raw_shipped_mt"] = df["shipped_mt"]
+    df["raw_fg_mt"] = df["fg_mt"]
+    df["raw_wip_mt"] = df["wip_mt"]
+    df["raw_unsched_mt"] = df["unsched_mt"]
+
+    remaining = df["sc_vol_mt"].copy()
+    df["allocated_sc_prior_shipped_mt"] = np.minimum(df["raw_sc_prior_delivery_mt"], remaining)
+    remaining = (remaining - df["allocated_sc_prior_shipped_mt"]).clip(lower=0)
+
+    df["allocated_gi_shipped_mt"] = np.minimum(df["raw_shipped_mt"], remaining)
+    remaining = (remaining - df["allocated_gi_shipped_mt"]).clip(lower=0)
+
+    df["allocated_shipped_mt"] = df["allocated_sc_prior_shipped_mt"] + df["allocated_gi_shipped_mt"]
+
+    df["allocated_fg_mt"] = np.minimum(df["raw_fg_mt"], remaining)
+    remaining = (remaining - df["allocated_fg_mt"]).clip(lower=0)
+
+    df["allocated_wip_mt"] = np.minimum(df["raw_wip_mt"], remaining)
+    remaining = (remaining - df["allocated_wip_mt"]).clip(lower=0)
+
+    df["allocated_unsched_mt"] = np.minimum(df["raw_unsched_mt"], remaining)
+    remaining = (remaining - df["allocated_unsched_mt"]).clip(lower=0)
+
+    df["allocated_no_plan_mt"] = remaining
+
+    # Backward-compatible names now refer to mutually exclusive quantities.
+    df["shipped_mt"] = df["allocated_shipped_mt"]
+    df["fg_mt"] = df["allocated_fg_mt"]
+    df["wip_mt"] = df["allocated_wip_mt"]
+    df["unsched_mt"] = df["allocated_unsched_mt"]
+    df["no_plan_mt"] = df["allocated_no_plan_mt"]
 
     # --- Status label (based on primary unfulfilled portion) ---
     df["status"] = _determine_status(df)
@@ -55,34 +82,23 @@ def _determine_status(df: pd.DataFrame) -> pd.Series:
     """Assign primary status based on quantity distribution."""
     status = pd.Series("No Plan", index=df.index)
 
-    # Priority: Shipped > In Stock > In Production > Planned > No Plan
-    # If shipped_mt covers full SC vol → Shipped
-    # If partial → Partially Shipped (still check remaining)
+    # Primary status follows the most severe remaining allocated segment, so
+    # partial shipment cannot hide unscheduled/no-plan exposure.
+    status[df["allocated_shipped_mt"] >= df["sc_vol_mt"]] = "Shipped"
+    status[df["allocated_fg_mt"] > 0] = "In Stock"
+    status[df["allocated_wip_mt"] > 0] = "In Production"
+    status[df["allocated_unsched_mt"] > 0] = "Planned (Unscheduled)"
+    status[df["allocated_no_plan_mt"] > 0] = "No Plan"
 
-    fully_shipped = df["shipped_mt"] >= df["sc_vol_mt"]
-    status[fully_shipped] = "Shipped"
-
-    partial_shipped = (df["shipped_mt"] > 0) & ~fully_shipped
-    status[partial_shipped] = "Partially Shipped"
-
-    # For non-shipped: check FG
-    not_shipped = df["shipped_mt"] == 0
-    has_fg = not_shipped & (df["fg_mt"] > 0)
-    status[has_fg] = "In Stock"
-
-    # Check WIP (scheduled production)
-    no_fg = not_shipped & (df["fg_mt"] == 0)
-    has_wip = no_fg & (df["wip_mt"] > 0)
-    status[has_wip] = "In Production"
-
-    # Check unscheduled (has work order but no date)
-    no_wip = no_fg & (df["wip_mt"] == 0)
-    has_unsched = no_wip & (df["unsched_mt"] > 0)
-    status[has_unsched] = "Planned (Unscheduled)"
-
-    # Rest = No Plan
-    no_plan = no_wip & (df["unsched_mt"] == 0)
-    status[no_plan] = "No Plan"
+    partial_only = (
+        (df["allocated_shipped_mt"] > 0)
+        & (df["allocated_shipped_mt"] < df["sc_vol_mt"])
+        & (df["allocated_fg_mt"] == 0)
+        & (df["allocated_wip_mt"] == 0)
+        & (df["allocated_unsched_mt"] == 0)
+        & (df["allocated_no_plan_mt"] == 0)
+    )
+    status[partial_only] = "Partially Shipped"
 
     return status
 
@@ -91,7 +107,7 @@ def _determine_risk(df: pd.DataFrame) -> pd.Series:
     """Assign risk tier based on status and gap."""
     risk = pd.Series("", index=df.index)
 
-    # Shipped / Partially Shipped → Green (done or in progress)
+    # Shipped / Partially Shipped → Green/Yellow
     risk[df["status"] == "Shipped"] = "Green"
     risk[df["status"] == "Partially Shipped"] = "Yellow"
 

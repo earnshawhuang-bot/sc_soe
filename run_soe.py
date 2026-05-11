@@ -44,9 +44,14 @@ def main():
 
     # --- Phase 1: Extract ---
     print("[1/6] Extracting SC baseline...")
-    sc = extract_sc(str(root / cfg["files"]["sc"]), month)
+    customer_mapping = cfg["files"].get("customer_mapping")
+    customer_mapping_path = str(root / customer_mapping) if customer_mapping else None
+    sc = extract_sc(str(root / cfg["files"]["sc"]), month, customer_mapping_path, data_date)
     baseline = sc[sc["in_baseline"]]
-    print(f"  SC total: {len(sc)} rows, Baseline: {len(baseline)} SOs, {baseline['sc_vol_mt'].sum():,.0f} MT")
+    print(f"  SC total: {len(sc)} SOs, Baseline: {len(baseline)} SOs, {baseline['sc_vol_mt'].sum():,.0f} MT")
+    unmatched_customer = sc.attrs.get("unmatched_customer")
+    if unmatched_customer is not None and not unmatched_customer.empty:
+        print(f"  Customer mapping unmatched: {len(unmatched_customer)} rows, {unmatched_customer['raw_sc_vol_mt'].sum():,.0f} MT")
 
     print("[2/6] Extracting Shipped...")
     shipped = extract_shipped(str(root / cfg["files"]["shipped"]))
@@ -81,7 +86,15 @@ def main():
 
     # --- Phase 3: Output ---
     print("Writing outputs...")
-    excel_path = write_excel(master, str(output_dir), month, target_mt, data_date)
+    excel_path = write_excel(
+        master,
+        str(output_dir),
+        month,
+        target_mt,
+        data_date,
+        sc.attrs,
+        cfg.get("excel_version_suffix", ""),
+    )
     print(f"  Excel: {excel_path}")
 
     html_path = write_html_report(master, str(output_dir), month, target_mt, data_date)
@@ -91,10 +104,10 @@ def main():
     print()
     print("=== Summary ===")
     print(f"  Baseline:  {master['sc_vol_mt'].sum():>10,.0f} MT ({len(master)} SOs)")
-    print(f"  Shipped:   {master['shipped_mt'].sum():>10,.0f} MT")
-    print(f"  In Stock:  {master['fg_mt'].sum():>10,.0f} MT")
-    print(f"  WIP:       {master['wip_mt'].sum():>10,.0f} MT")
-    print(f"  At Risk:   {(master['unsched_mt'].sum() + master['no_plan_mt'].sum()):>10,.0f} MT")
+    print(f"  Shipped:   {master['allocated_shipped_mt'].sum():>10,.0f} MT")
+    print(f"  In Stock:  {master['allocated_fg_mt'].sum():>10,.0f} MT")
+    print(f"  WIP:       {master['allocated_wip_mt'].sum():>10,.0f} MT")
+    print(f"  At Risk:   {(master['allocated_unsched_mt'].sum() + master['allocated_no_plan_mt'].sum()):>10,.0f} MT")
     print()
     risk_counts = master["risk_tier"].value_counts()
     for tier in ["Green", "Yellow", "Orange", "Red", "Critical"]:

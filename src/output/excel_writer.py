@@ -62,9 +62,18 @@ RISK_STYLE = {
 }
 
 
-def write_excel(master: pd.DataFrame, output_dir: str, month: str, target_mt: float, data_date: str = ""):
+def write_excel(
+    master: pd.DataFrame,
+    output_dir: str,
+    month: str,
+    target_mt: float,
+    data_date: str = "",
+    sc_audits: dict = None,
+    version_suffix: str = "",
+):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    output_path = Path(output_dir) / f"SOE_Tracking_{month}.xlsx"
+    suffix = f"-{version_suffix}" if version_suffix else ""
+    output_path = Path(output_dir) / f"SOE_Tracking_{month}{suffix}.xlsx"
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -74,6 +83,8 @@ def write_excel(master: pd.DataFrame, output_dir: str, month: str, target_mt: fl
     _sheet_master(wb, master)
     _sheet_gap_detail(wb, master)
     _sheet_action(wb, master)
+    _sheet_overlap_audit(wb, master)
+    _sheet_sc_audits(wb, sc_audits or {})
 
     wb.save(str(output_path))
     return str(output_path)
@@ -107,13 +118,13 @@ def _sheet_summary(wb, master, month, target_mt):
     _kpi_header(ws, row=4)
     kpis = [
         ("BASELINE ORDERS", f"{master['sc_vol_mt'].sum():,.0f} MT", f"{len(master)} SOs", C_DARK_BLUE),
-        ("SHIPPED",         f"{master['shipped_mt'].sum():,.0f} MT",
+        ("SHIPPED",         f"{master['allocated_shipped_mt'].sum():,.0f} MT",
                             f"{(master['status']=='Shipped').sum() + (master['status']=='Partially Shipped').sum()} SOs", C_GREEN_FG),
-        ("IN STOCK (FG)",   f"{master['fg_mt'].sum():,.0f} MT",
+        ("IN STOCK (FG)",   f"{master['allocated_fg_mt'].sum():,.0f} MT",
                             f"{(master['status']=='In Stock').sum()} SOs", "2E7D32"),
-        ("IN PRODUCTION",   f"{master['wip_mt'].sum():,.0f} MT",
+        ("IN PRODUCTION",   f"{master['allocated_wip_mt'].sum():,.0f} MT",
                             f"{(master['status']=='In Production').sum()} SOs", C_YELLOW_FG),
-        ("AT RISK",         f"{(master['unsched_mt']+master['no_plan_mt']).sum():,.0f} MT",
+        ("AT RISK",         f"{(master['allocated_unsched_mt']+master['allocated_no_plan_mt']).sum():,.0f} MT",
                             f"{master['status'].isin(['Planned (Unscheduled)','No Plan']).sum()} SOs", C_RED_FG),
     ]
     col_starts = [1, 3, 5, 7, 9]
@@ -173,9 +184,14 @@ def _sheet_summary(wb, master, month, target_mt):
     _section_header(ws, row=start_row, col=1, title="ORDER TYPE BREAKDOWN", span=9)
     ot_headers = ["Order Type", "SOs", "Volume (MT)", "Shipped", "FG", "WIP", "Unscheduled", "No Plan"]
     _table_header(ws, row=start_row+1, col=1, headers=ot_headers, widths=[28,8,14,12,10,10,14,12])
-    for i, ot in enumerate(["Carry Over Stock","Carry Over Unproduced","Fresh Order This Month"]):
-        sub = master[master["order_type"] == ot]
-        vals = [ot, len(sub), round(sub["sc_vol_mt"].sum(),1),
+    order_type_fields = [
+        ("Carry Over Stock", "carry_over_stock_mt"),
+        ("Carry Over Unproduced", "carry_over_unproduced_mt"),
+        ("Fresh Order This Month", "fresh_this_month_mt"),
+    ]
+    for i, (ot, vol_field) in enumerate(order_type_fields):
+        sub = master[master[vol_field] > 0] if vol_field in master.columns else master[master["order_type"] == ot]
+        vals = [ot, len(sub), round(sub[vol_field].sum() if vol_field in sub.columns else sub["sc_vol_mt"].sum(),1),
                 round(sub["shipped_mt"].sum(),1), round(sub["fg_mt"].sum(),1),
                 round(sub["wip_mt"].sum(),1), round(sub["unsched_mt"].sum(),1),
                 round(sub["no_plan_mt"].sum(),1)]
@@ -237,19 +253,30 @@ def _sheet_master(wb, master):
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "A3"
 
-    _banner(ws, "SO MASTER — ALL BASELINE ORDERS", span=17)
+    _banner(ws, "SO MASTER — ALL BASELINE ORDERS", span=29)
 
     col_defs = [
         ("SO Number",        "so",               12),
         ("Plant",            "plant",              8),
         ("Cluster",          "cluster",           10),
         ("Order Type",       "order_type",        22),
-        ("SC Vol (MT)",      "sc_vol_mt",         12),
-        ("Shipped (MT)",     "shipped_mt",        12),
-        ("FG Stock (MT)",    "fg_mt",             12),
-        ("WIP (MT)",         "wip_mt",            12),
-        ("Unscheduled (MT)", "unsched_mt",        16),
-        ("No Plan (MT)",     "no_plan_mt",        14),
+        ("Adjusted SC Vol (MT)", "sc_vol_mt",         16),
+        ("Raw SC Vol (MT)",      "raw_sc_vol_mt",     14),
+        ("Allocated SC Prior Shipped", "allocated_sc_prior_shipped_mt", 24),
+        ("Allocated GI Shipped", "allocated_gi_shipped_mt", 20),
+        ("Allocated Shipped",    "allocated_shipped_mt", 16),
+        ("Allocated FG",         "allocated_fg_mt",      14),
+        ("Allocated WIP",        "allocated_wip_mt",     14),
+        ("Allocated Unscheduled","allocated_unsched_mt", 18),
+        ("Allocated No Plan",    "allocated_no_plan_mt", 16),
+        ("Raw SC Prior Delivery","raw_sc_prior_delivery_mt", 22),
+        ("Raw Shipped",          "raw_shipped_mt",       12),
+        ("Raw FG",               "raw_fg_mt",            12),
+        ("Raw WIP",              "raw_wip_mt",           12),
+        ("Raw Unscheduled",      "raw_unsched_mt",       16),
+        ("CO Stock Adj",         "carry_over_stock_mt",  14),
+        ("CO Unprod Adj",        "carry_over_unproduced_mt", 15),
+        ("Fresh Adj",            "fresh_this_month_mt",  12),
         ("Status",           "status",            22),
         ("Risk Tier",        "risk_tier",         12),
         ("Planned End Date", "planned_end_date",  16),
@@ -315,8 +342,8 @@ def _sheet_gap_detail(wb, master):
         ("Plant",            "plant",              8),
         ("Cluster",          "cluster",           10),
         ("Order Type",       "order_type",        22),
-        ("SC Vol (MT)",      "sc_vol_mt",         12),
-        ("WIP (MT)",         "wip_mt",            12),
+        ("Adjusted SC Vol (MT)", "sc_vol_mt",         16),
+        ("Allocated WIP",        "allocated_wip_mt",  14),
         ("Planned End Date", "planned_end_date",  16),
         ("Loading Date",     "loading_date",      14),
         ("Gap (days)",       "gap_days",          12),
@@ -364,14 +391,16 @@ def _sheet_action(wb, master):
         master["status"].isin(["No Plan", "Planned (Unscheduled)"])
     ].sort_values(["status", "sc_vol_mt"], ascending=[True, False]).copy()
 
-    _banner(ws, f"ACTION REQUIRED — {len(action_df)} SOs NEED IMMEDIATE ATTENTION", span=8, urgent=True)
+    _banner(ws, f"ACTION REQUIRED — {len(action_df)} SOs NEED IMMEDIATE ATTENTION", span=10, urgent=True)
 
     col_defs = [
         ("SO Number",        "so",               12),
         ("Plant",            "plant",              8),
         ("Cluster",          "cluster",           10),
         ("Order Type",       "order_type",        22),
-        ("SC Vol (MT)",      "sc_vol_mt",         12),
+        ("Adjusted SC Vol (MT)", "sc_vol_mt",         16),
+        ("Allocated Unscheduled","allocated_unsched_mt", 18),
+        ("Allocated No Plan",    "allocated_no_plan_mt", 16),
         ("Status",           "status",            22),
         ("Risk Tier",        "risk_tier",         12),
         ("Loading Date",     "loading_date",      14),
@@ -399,6 +428,97 @@ def _sheet_action(wb, master):
         ws.row_dimensions[r].height = 18
 
     ws.auto_filter.ref = f"A2:{get_column_letter(len(col_defs))}2"
+
+
+def _sheet_overlap_audit(wb, master):
+    ws = wb.create_sheet("Overlap Audit")
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A3"
+
+    overlap = master.copy()
+    overlap["raw_coverage_mt"] = (
+        overlap["raw_sc_prior_delivery_mt"]
+        + overlap["raw_shipped_mt"]
+        + overlap["raw_fg_mt"]
+        + overlap["raw_wip_mt"]
+        + overlap["raw_unsched_mt"]
+    )
+    overlap["raw_over_baseline_mt"] = (overlap["raw_coverage_mt"] - overlap["sc_vol_mt"]).clip(lower=0)
+    overlap = overlap[overlap["raw_over_baseline_mt"] > 0.01].sort_values("raw_over_baseline_mt", ascending=False)
+
+    _banner(ws, f"RAW SOURCE OVERLAP AUDIT — {len(overlap)} SOs", span=12)
+    col_defs = [
+        ("SO Number", "so", 12),
+        ("Plant", "plant", 8),
+        ("Cluster", "cluster", 10),
+        ("Order Type", "order_type", 22),
+        ("Adjusted Baseline", "sc_vol_mt", 16),
+        ("Raw SC Prior Delivery", "raw_sc_prior_delivery_mt", 22),
+        ("Raw Shipped", "raw_shipped_mt", 12),
+        ("Raw FG", "raw_fg_mt", 12),
+        ("Raw WIP", "raw_wip_mt", 12),
+        ("Raw Unscheduled", "raw_unsched_mt", 16),
+        ("Raw Coverage", "raw_coverage_mt", 14),
+        ("Raw Over Baseline", "raw_over_baseline_mt", 18),
+    ]
+    _write_table(ws, overlap, col_defs, row=2)
+
+
+def _sheet_sc_audits(wb, sc_audits):
+    audit_specs = [
+        ("SC Row Detail", "sc_row_detail"),
+        ("SC Fresh Next Month", "fresh_next_month"),
+        ("SC Unknown Type", "unknown_type"),
+        ("SC Prior Delivery", "sc_prior_delivery"),
+        ("Unmatched End Customer", "unmatched_customer"),
+    ]
+    for sheet_name, key in audit_specs:
+        df = sc_audits.get(key)
+        if df is None:
+            df = pd.DataFrame()
+        ws = wb.create_sheet(sheet_name[:31])
+        ws.sheet_view.showGridLines = False
+        ws.freeze_panes = "A2"
+        if df.empty:
+            ws.cell(row=1, column=1, value="No rows")
+            ws["A1"].font = _font(bold=True)
+            continue
+        headers = list(df.columns)
+        widths = [min(max(len(str(h)) + 2, 12), 24) for h in headers]
+        _table_header(ws, row=1, col=1, headers=headers, widths=widths)
+        for i, (_, row) in enumerate(df.iterrows(), start=2):
+            bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
+            for j, h in enumerate(headers, start=1):
+                val = row[h]
+                if pd.isna(val) if not isinstance(val, str) else False:
+                    val = ""
+                c = ws.cell(row=i, column=j, value=val)
+                c.fill = _fill(bg)
+                c.font = _font()
+                c.border = _border_thin()
+                c.alignment = _align("center" if j > 1 else "left")
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+
+
+def _write_table(ws, df, col_defs, row=1):
+    headers = [h for h, _, _ in col_defs]
+    widths = [w for _, _, w in col_defs]
+    fields = [f for _, f, _ in col_defs]
+    _table_header(ws, row=row, col=1, headers=headers, widths=widths)
+    for i, (_, record) in enumerate(df.iterrows(), start=row + 1):
+        bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
+        for j, field in enumerate(fields, start=1):
+            val = record.get(field)
+            if pd.isna(val) if not isinstance(val, str) else False:
+                val = ""
+            c = ws.cell(row=i, column=j, value=val)
+            c.fill = _fill(bg)
+            c.font = _font()
+            c.alignment = _align("center" if j > 2 else "left")
+            c.border = _border_thin()
+            if isinstance(val, (int, float)) and field.endswith("_mt"):
+                c.number_format = "#,##0.0"
+    ws.auto_filter.ref = f"A{row}:{get_column_letter(len(col_defs))}{row}"
 
 
 # ── Helper functions ────────────────────────────────────────────────────────
