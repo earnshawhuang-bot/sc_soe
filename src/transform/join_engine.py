@@ -53,18 +53,24 @@ def build_so_master(
         on="so", how="left"
     )
 
-    # LEFT JOIN Loading Plan
+    # LEFT JOIN Loading Plan. Keep optional LP diagnostics when available while
+    # preserving the legacy columns used by gap/risk calculations.
+    lp_cols = [
+        "so", "loading_date", "load_mt", "source", "lp_valid_mt",
+        "lp_unconfirmed_mt", "lp_line_count", "lp_date_status", "lp_has_record",
+    ]
+    lp_cols = [col for col in lp_cols if col in loading_plan.columns]
     master = master.merge(
-        loading_plan[["so", "loading_date", "load_mt", "source"]].rename(
-            columns={"source": "lp_source"}
-        ),
+        loading_plan[lp_cols].rename(columns={"source": "lp_source"}),
         on="so", how="left"
     )
 
     # Fill NaN with 0 for quantity columns
-    qty_cols = ["shipped_mt", "fg_mt", "wip_mt", "unsched_mt", "load_mt"]
+    qty_cols = ["shipped_mt", "fg_mt", "wip_mt", "unsched_mt", "load_mt", "lp_valid_mt", "lp_unconfirmed_mt"]
     for col in qty_cols:
         if col in master.columns:
             master[col] = master[col].fillna(0)
+    if "lp_has_record" in master.columns:
+        master["lp_has_record"] = master["lp_has_record"].fillna(False).astype(bool)
 
     return master

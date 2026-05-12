@@ -411,3 +411,234 @@ Every SO in the baseline can have multiple raw source signals, but the allocated
 | 8 | SC Loading Date (P) | Not reliable as a required loading deadline, but useful for the SC prior-month delivery pre-allocation window | Never use as fallback for gap calculation; only use for the explicit previous-month SC delivery filter |
 | 9 | Raw source overlap | Same SO can appear in Shipped, FG, and PP simultaneously, causing raw sums to exceed baseline | Use allocated waterfall for KPIs; keep raw quantities in Overlap Audit |
 | 10 | SC Delivery PCS | Negative delivery PCS rows reverse/correct delivery signals | Exclude negative Delivery PCS rows from SC prior-month delivery pre-allocation |
+
+---
+
+## 10. Loading Plan Shipping Readiness Blueprint
+
+### 10.1 High-Level Purpose
+
+The model is upgraded from a pure order execution tracker into a **monthly billing-order shipping fulfillment model**.
+
+It answers four management questions:
+- Which SC baseline orders are this month's billing responsibility?
+- Which of those orders already have a Loading Plan arrangement?
+- For all Loading Plan demand, is the shipping arrangement confirmed or still unconfirmed?
+- Does Shipped / FG / PP evidence support the loading demand, and where is the risk?
+
+The key design principle is:
+
+```
+SC Baseline = current-month billing responsibility
+Loading Plan = shipping arrangement / open delivery ledger
+Shipped / FG / PP = supply execution status
+```
+
+Loading Plan is **not** a peer status to Shipped / FG / PP. It is a separate shipping-arrangement dimension that must be cross-checked against supply readiness.
+
+---
+
+### 10.2 Loading Plan Source Tables
+
+#### KS Loading Plan
+
+Source:
+- Folder: `06-Loading Plan/ks_loading plan/`
+- File: `Loading plan-May.xlsx`
+- Sheet: `Loading plan`
+
+Key fields:
+| Field | Usage |
+|-------|-------|
+| Invoice No | Split / normalize into SO |
+| 20GP / 40GP / 40HQ | Convert container count into MT |
+| Loading | Required loading date or unconfirmed loading text |
+| MT | Source-table MT for audit only |
+| Unnamed: 20 | Current observed value: `4月已开票`; excluded from current invoice scope but kept in audit |
+
+Container MT conversion:
+| Container | MT |
+|-----------|----|
+| 20GP | 14.5 |
+| 40GP | 24.5 |
+| 40HQ | 24.5 |
+
+KS SO parsing:
+- `_` separates multiple SOs.
+- `-N` is a batch/container suffix and is stripped.
+- `-N~M` is a multi-container range and is stripped to the base SO.
+- Short SO fragments inherit the prefix from the longest 10-digit SO in the invoice group.
+- Non-standard `LM*` invoices are kept in parse-exception audit and excluded from SO matching.
+
+#### IDN Export Loading Plan
+
+Source:
+- Folder: `06-Loading Plan/idn_loading plan/`
+- File: `Schedule Planning Dispatch 260511.xlsx`
+- Sheet: `ORDER OUTSTANDING `, with trailing space.
+
+Key fields:
+| Field | Usage |
+|-------|-------|
+| SC No. | Direct SO key, normalized from Excel numeric format |
+| Region | Cluster reference |
+| Cont Qty / Cont Size | Convert to MT using the same 14.5 / 24.5 rule |
+| Rough Ton | Source-table MT for audit only |
+| ELD | Loading date or unconfirmed loading value such as TBA |
+
+#### IDN Domestic Loading Plan
+
+Source:
+- Folder: `06-Loading Plan/idn_loading plan/`
+- File: `NEW DOMESTIC TRACKING 260511.xlsx`
+- Sheet: `Order List`, header row 2.
+
+Key fields:
+| Field | Usage |
+|-------|-------|
+| SC NO. | Preferred SO key when valid |
+| INV NO. | Fallback split source when SC NO. is not valid |
+| ELD | Loading date or unconfirmed loading value |
+| Weight | Loading MT |
+| STATUS | Operational reference |
+
+IDN Domestic SO parsing:
+- Prefer valid `SC NO.`.
+- If `SC NO.` is missing or invalid, split `INV NO.`.
+- Comma and ampersand split multiple SOs.
+- `-N` and `-N~M` suffixes are stripped.
+- `LMIDSAM*` and other non-SO records remain in parse-exception audit.
+
+---
+
+### 10.3 Clean Loading Plan Demand-Line Output
+
+The cleaned Loading Plan layer preserves demand-line granularity. It does **not** aggregate to SO during extraction.
+
+Each row represents:
+
+```
+one plant + one source + one source row + one parsed SO + one loading demand
+```
+
+Standard fields:
+| Field | Meaning |
+|-------|---------|
+| plant | KS / IDN |
+| lp_source | KS_LP / IDN_Export / IDN_Domestic |
+| source_file / source_sheet / source_row | Traceability back to source workbook |
+| invoice_no_raw | Raw invoice / SC key text |
+| so | Parsed SO |
+| so_parse_status | Parsed / Non-SC / Parse Failed |
+| loading_date_raw | Original Loading / ELD value |
+| loading_date | Parsed date when valid |
+| loading_date_status | Valid Date / TBA / Blank / Text Month / Invalid Text |
+| load_mt | Business-rule MT used by the model |
+| source_mt | Source workbook MT for audit comparison |
+| exclude_from_current_invoice | True for records such as `4月已开票` |
+| exclude_reason | Raw exclusion reason |
+
+Important rule:
+
+```
+All non-excluded Loading Plan records participate in cross-validation.
+Only Valid Date records participate in gap calculation.
+```
+
+TBA, blank, text-month, and invalid-text loading values are not dropped. They are treated as unconfirmed shipping risks.
+
+---
+
+### 10.4 SC vs Loading Plan Reconciliation
+
+This layer compares two different scopes:
+
+```
+SC Baseline = current-month billing orders
+Loading Plan = sales-side open delivery / loading arrangement ledger
+```
+
+Reconciliation categories:
+| Category | Meaning |
+|----------|---------|
+| In SC and In LP | Current billing SO has loading arrangement |
+| In SC only | Current billing SO has no loading arrangement |
+| In LP only | Loading Plan has SO not in current SC baseline |
+| LP excluded - prior invoiced | Excluded from current billing scope but retained in audit |
+
+The key management interpretation:
+- `In SC only + FG`: goods are ready but no loading arrangement exists.
+- `In SC only + WIP`: production is planned but shipping is not arranged yet.
+- `In SC only + No Plan`: both production and shipping arrangement are missing.
+- `In LP only`: the loading ledger contains demand outside the current billing baseline and must be reviewed separately.
+
+---
+
+### 10.5 Shipping Readiness Matrix
+
+Shipping readiness cross-checks Loading Plan demand against supply evidence:
+
+| Loading Plan State | Supply Evidence | Interpretation |
+|--------------------|-----------------|----------------|
+| Valid Date | Shipped | Covered by Shipped |
+| Valid Date | FG | Covered by FG |
+| Valid Date | WIP on time | Production can support loading |
+| Valid Date | WIP late | Production misses loading date |
+| Valid Date | Unscheduled WO | Work order exists but completion date is missing |
+| Valid Date | No supply | Loading arranged but no supply signal |
+| TBA / Blank / Text / Invalid | Any supply state | Loading date is unconfirmed; still participates in risk review |
+
+Gap logic remains:
+
+```
+LP Gap Days = Loading Date - (Planned End Date + 1 day)
+```
+
+But this gap is computed only when Loading Date is valid.
+
+---
+
+### 10.6 Excel Output Additions
+
+The Excel workbook includes these Loading Plan sheets:
+- `Loading Plan Clean Detail`
+- `SC vs LP Reconciliation`
+- `Shipping Readiness`
+- `LP Date Exceptions`
+- `LP Parse Exceptions`
+- `LP Excluded Prior Invoiced`
+
+Summary also includes a Loading Plan readiness panel:
+- SC Baseline
+- In Loading Plan
+- SC without Loading Plan
+- Valid Loading Date
+- Unconfirmed Loading Date
+- LP with Supply Risk
+- Past Loading Not Shipped
+
+---
+
+### 10.7 Phase 2 Roadmap: Data Consumption Layer
+
+Excel, HTML, and Power BI are presentation layers. The system should later output a stable machine-readable data mart so all presentation layers consume the same business logic.
+
+Phase 2 target structure:
+
+```
+output/<run>/data_mart/
+  clean_loading_plan_lines.csv
+  sc_lp_reconciliation.csv
+  shipping_readiness.csv
+  risk_summary.csv
+  lp_date_exceptions.csv
+  lp_parse_exceptions.csv
+  lp_excluded_prior_invoiced.csv
+  manifest.yaml
+  data_dictionary.md
+```
+
+Recommended storage:
+- CSV as the first machine-readable table output because it is easy for Excel, Power BI, and HTML tooling to consume.
+- YAML or JSON only for run metadata such as source files, row counts, and run parameters.
+- Parquet or SQLite can be considered later if data volume or querying needs grow.

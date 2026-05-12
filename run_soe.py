@@ -18,10 +18,12 @@ from src.extract.lp_extractor import (
     extract_lp_ks,
     extract_lp_idn_export,
     extract_lp_idn_domestic,
-    combine_loading_plans,
+    combine_loading_plan_lines,
+    aggregate_loading_plan_for_master,
 )
 from src.transform.join_engine import build_so_master
 from src.transform.status_engine import assign_status_and_gap
+from src.transform.loading_plan_engine import build_loading_plan_analysis
 from src.output.excel_writer import write_excel
 from src.output.html_report import write_html_report
 
@@ -74,14 +76,27 @@ def main():
     lp_ks = extract_lp_ks(str(root / cfg["files"]["lp_ks"]), data_date)
     lp_idn_ex = extract_lp_idn_export(str(root / cfg["files"]["lp_idn_export"]), data_date)
     lp_idn_dom = extract_lp_idn_domestic(str(root / cfg["files"]["lp_idn_domestic"]), data_date)
-    loading_plan = combine_loading_plans(lp_ks, lp_idn_ex, lp_idn_dom)
-    print(f"  Loading Plan: {len(loading_plan)} SOs (KS:{len(lp_ks)}, IDN_Ex:{len(lp_idn_ex)}, IDN_Dom:{len(lp_idn_dom)})")
+    loading_lines = combine_loading_plan_lines(lp_ks, lp_idn_ex, lp_idn_dom)
+    loading_plan = aggregate_loading_plan_for_master(loading_lines)
+    print(
+        f"  Loading Plan Lines: {len(loading_lines)} rows "
+        f"(KS:{len(lp_ks)}, IDN_Ex:{len(lp_idn_ex)}, IDN_Dom:{len(lp_idn_dom)})"
+    )
+    print(f"  Loading Plan SO-level: {len(loading_plan)} SOs")
 
     # --- Phase 2: Join ---
     print("[6/6] Building SO Master & calculating gap...")
     master = build_so_master(sc, shipped, fg, pp_sched_agg, pp_unsched_agg, loading_plan)
     master = assign_status_and_gap(master)
     print(f"  Master: {len(master)} SOs")
+    lp_outputs = build_loading_plan_analysis(
+        sc, master, loading_lines, shipped, fg, pp_sched_agg, pp_unsched_agg, data_date
+    )
+    print(
+        "  LP analysis: "
+        f"{len(lp_outputs['reconciliation'])} reconciliation rows, "
+        f"{len(lp_outputs['shipping_readiness'])} readiness rows"
+    )
     print()
 
     # --- Phase 3: Output ---
@@ -93,6 +108,7 @@ def main():
         target_mt,
         data_date,
         sc.attrs,
+        lp_outputs,
         cfg.get("excel_version_suffix", ""),
     )
     print(f"  Excel: {excel_path}")

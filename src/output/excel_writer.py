@@ -69,6 +69,7 @@ def write_excel(
     target_mt: float,
     data_date: str = "",
     sc_audits: dict = None,
+    lp_outputs: dict = None,
     version_suffix: str = "",
 ):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -79,19 +80,20 @@ def write_excel(
     wb.remove(wb.active)
     master.attrs["data_date"] = data_date
 
-    _sheet_summary(wb, master, month, target_mt)
+    _sheet_summary(wb, master, month, target_mt, lp_outputs or {})
     _sheet_master(wb, master)
     _sheet_gap_detail(wb, master)
     _sheet_action(wb, master)
     _sheet_overlap_audit(wb, master)
     _sheet_sc_audits(wb, sc_audits or {})
+    _sheet_loading_plan_outputs(wb, lp_outputs or {})
 
     wb.save(str(output_path))
     return str(output_path)
 
 
 # ── Sheet 1: Executive Summary ─────────────────────────────────────────────
-def _sheet_summary(wb, master, month, target_mt):
+def _sheet_summary(wb, master, month, target_mt, lp_outputs=None):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
     master = master.copy()
@@ -209,6 +211,21 @@ def _sheet_summary(wb, master, month, target_mt):
             c.border = _border_thin()
         ws.row_dimensions[r].height = 22
 
+    # Loading Plan KPI panel (right-side block, independent from SC waterfall)
+    if lp_outputs:
+        _section_header(ws, row=11, col=15, title="LOADING PLAN READINESS", span=4)
+        _table_header(ws, row=12, col=15, headers=["Metric", "Volume (MT)", "Rows/SOs"], widths=[30, 16, 12])
+        for i, row_data in enumerate(_build_lp_kpis(master, lp_outputs)):
+            r = 13 + i
+            bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
+            for j, val in enumerate(row_data):
+                c = ws.cell(row=r, column=15+j, value=val)
+                c.fill = _fill(bg)
+                c.font = _font(bold=(j == 0))
+                c.alignment = _align("center" if j > 0 else "left")
+                c.border = _border_thin()
+            ws.row_dimensions[r].height = 20
+
     # ── Order Type Breakdown ──
     start_row = 29
     _section_header(ws, row=start_row, col=1, title="ORDER TYPE BREAKDOWN", span=9)
@@ -288,6 +305,47 @@ def _sheet_summary(wb, master, month, target_mt):
     for col in range(1, 13):
         ws.column_dimensions[get_column_letter(col)].width = 14
     _format_summary_numbers(ws)
+
+
+def _build_lp_kpis(master, lp_outputs):
+    readiness = lp_outputs.get("shipping_readiness", pd.DataFrame())
+    reconciliation = lp_outputs.get("reconciliation", pd.DataFrame())
+    if readiness is None:
+        readiness = pd.DataFrame()
+    if reconciliation is None:
+        reconciliation = pd.DataFrame()
+
+    sc_without_lp = 0
+    sc_without_lp_rows = 0
+    if not reconciliation.empty and "reconciliation_status" in reconciliation.columns:
+        mask = reconciliation["reconciliation_status"] == "In SC only"
+        sc_without_lp = reconciliation.loc[mask, "sc_vol_mt"].sum() if "sc_vol_mt" in reconciliation.columns else 0
+        sc_without_lp_rows = int(mask.sum())
+
+    def sum_load(mask):
+        if readiness.empty or "load_mt" not in readiness.columns:
+            return 0, 0
+        return readiness.loc[mask, "load_mt"].sum(), int(mask.sum())
+
+    valid_mt, valid_rows = sum_load(readiness.get("loading_date_status", pd.Series(dtype=str)) == "Valid Date")
+    unconfirmed_mt, unconfirmed_rows = sum_load(readiness.get("loading_date_status", pd.Series(dtype=str)) != "Valid Date")
+    supply_risk_mt, supply_risk_rows = sum_load(
+        readiness.get("shipping_readiness_tier", pd.Series(dtype=str)).isin(["Orange", "Red", "Critical"])
+    )
+    past_not_shipped_mt, past_not_shipped_rows = sum_load(
+        readiness.get("past_loading_not_shipped", pd.Series(dtype=bool)) == True
+    )
+    in_sc_lp_mt, in_sc_lp_rows = sum_load(readiness.get("in_sc_baseline", pd.Series(dtype=bool)) == True)
+
+    return [
+        ["SC Baseline", master["sc_vol_mt"].sum(), len(master)],
+        ["In Loading Plan", in_sc_lp_mt, in_sc_lp_rows],
+        ["SC without Loading Plan", sc_without_lp, sc_without_lp_rows],
+        ["Valid Loading Date", valid_mt, valid_rows],
+        ["Unconfirmed Loading Date", unconfirmed_mt, unconfirmed_rows],
+        ["LP with Supply Risk", supply_risk_mt, supply_risk_rows],
+        ["Past Loading Not Shipped", past_not_shipped_mt, past_not_shipped_rows],
+    ]
 
 
 def _format_summary_numbers(ws):
@@ -584,6 +642,52 @@ def _sheet_sc_audits(wb, sc_audits):
                 c.border = _border_thin()
                 c.alignment = _align("center" if j > 1 else "left")
         ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
+
+
+def _sheet_loading_plan_outputs(wb, lp_outputs):
+    """Write Loading Plan clean detail, reconciliation, readiness, and audits."""
+    sheet_specs = [
+        ("Loading Plan Clean Detail", "clean_detail"),
+        ("SC vs LP Reconciliation", "reconciliation"),
+        ("Shipping Readiness", "shipping_readiness"),
+        ("LP Date Exceptions", "date_exceptions"),
+        ("LP Parse Exceptions", "parse_exceptions"),
+        ("LP Excluded Prior Invoiced", "excluded_prior_invoiced"),
+    ]
+    for sheet_name, key in sheet_specs:
+        df = lp_outputs.get(key)
+        if df is None:
+            df = pd.DataFrame()
+        _write_dataframe_sheet(wb, sheet_name, df)
+
+
+def _write_dataframe_sheet(wb, sheet_name, df):
+    ws = wb.create_sheet(sheet_name[:31])
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A2"
+    if df.empty:
+        ws.cell(row=1, column=1, value="No rows")
+        ws["A1"].font = _font(bold=True)
+        return
+
+    df = df.copy()
+    headers = list(df.columns)
+    widths = [min(max(len(str(h)) + 2, 12), 28) for h in headers]
+    _table_header(ws, row=1, col=1, headers=headers, widths=widths)
+    for i, (_, row) in enumerate(df.iterrows(), start=2):
+        bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
+        for j, h in enumerate(headers, start=1):
+            val = row[h]
+            if pd.isna(val) if not isinstance(val, str) else False:
+                val = ""
+            c = ws.cell(row=i, column=j, value=val)
+            c.fill = _fill(bg)
+            c.font = _font()
+            c.border = _border_thin()
+            c.alignment = _align("center" if j > 1 else "left", wrap=False)
+            if isinstance(val, (int, float)) and (str(h).endswith("_mt") or str(h) in ["load_mt", "source_mt"]):
+                c.number_format = "#,##0.0"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
 
 
 def _write_table(ws, df, col_defs, row=1):
