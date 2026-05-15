@@ -6,7 +6,14 @@ from pathlib import Path
 from datetime import datetime
 
 
-def write_html_report(master: pd.DataFrame, output_dir: str, month: str, target_mt: float, data_date: str):
+def write_html_report(
+    master: pd.DataFrame,
+    output_dir: str,
+    month: str,
+    target_mt: float,
+    data_date: str,
+    version_suffix: str = "",
+):
     """
     Generate an HTML narrative report.
 
@@ -18,7 +25,8 @@ def write_html_report(master: pd.DataFrame, output_dir: str, month: str, target_
         data_date: Data extraction date
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    output_path = Path(output_dir) / f"SOE_Report_{month}.html"
+    suffix = f"-{version_suffix}" if version_suffix else ""
+    output_path = Path(output_dir) / f"SOE_Report_{month}{suffix}.html"
 
     # Compute metrics
     metrics = _compute_metrics(master, target_mt)

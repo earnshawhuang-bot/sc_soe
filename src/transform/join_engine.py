@@ -42,8 +42,11 @@ def build_so_master(
     )
 
     # LEFT JOIN PP Scheduled (SO-level aggregated)
+    pp_sched_cols = ["so", "wip_mt", "planned_end_date", "machines"]
+    if "work_orders" in pp_sched_agg.columns:
+        pp_sched_cols.append("work_orders")
     master = master.merge(
-        pp_sched_agg[["so", "wip_mt", "planned_end_date", "machines"]],
+        pp_sched_agg[pp_sched_cols],
         on="so", how="left"
     )
 

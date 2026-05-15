@@ -53,6 +53,27 @@ def _border_bottom():
 def _align(h="left", v="center", wrap=False):
     return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
+
+DATE_FIELD_NAMES = {
+    "planned_end_date",
+    "available_date",
+    "loading_date",
+    "lp_earliest_valid_loading_date",
+}
+
+
+def _apply_date_format(cell, value):
+    """Show plain dates as dates, but preserve minute-level time if present."""
+    if not isinstance(value, (pd.Timestamp, datetime)):
+        return
+    ts = pd.Timestamp(value)
+    if pd.isna(ts):
+        return
+    if ts.hour or ts.minute or ts.second or ts.microsecond:
+        cell.number_format = "yyyy-mm-dd hh:mm"
+    else:
+        cell.number_format = "yyyy-mm-dd"
+
 RISK_STYLE = {
     "Green":    (_fill(C_GREEN),    _font(bold=True, color=C_GREEN_FG)),
     "Yellow":   (_fill(C_YELLOW),   _font(bold=True, color=C_YELLOW_FG)),
@@ -83,7 +104,7 @@ def write_excel(
     _sheet_summary(wb, master, month, target_mt, lp_outputs or {})
     _sheet_master(wb, master)
     _sheet_gap_detail(wb, master)
-    _sheet_action(wb, master)
+    _sheet_action(wb, master, lp_outputs or {})
     _sheet_overlap_audit(wb, master)
     _sheet_sc_audits(wb, sc_audits or {})
     _sheet_loading_plan_outputs(wb, lp_outputs or {})
@@ -211,20 +232,53 @@ def _sheet_summary(wb, master, month, target_mt, lp_outputs=None):
             c.border = _border_thin()
         ws.row_dimensions[r].height = 22
 
-    # Loading Plan KPI panel (right-side block, independent from SC waterfall)
+    # Loading Plan risk matrix: LP is a shipping-arrangement axis, not a
+    # standalone execution bucket in the Summary narrative.
     if lp_outputs:
-        _section_header(ws, row=11, col=15, title="LOADING PLAN READINESS", span=4)
-        _table_header(ws, row=12, col=15, headers=["Metric", "Volume (MT)", "Rows/SOs"], widths=[30, 16, 12])
-        for i, row_data in enumerate(_build_lp_kpis(master, lp_outputs)):
+        _section_header(ws, row=11, col=14, title="SHIPPED DATA CLOSURE (MT)", span=4)
+        _table_header(
+            ws,
+            row=12,
+            col=14,
+            headers=["Supply Status", "Total MT", "LP Closed / Matched", "LP Missing or Unclear"],
+            widths=[22, 16, 20, 22],
+        )
+        for i, row_data in enumerate(_build_shipped_closure_matrix(lp_outputs)):
             r = 13 + i
             bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
             for j, val in enumerate(row_data):
-                c = ws.cell(row=r, column=15+j, value=val)
+                c = ws.cell(row=r, column=14+j, value=val)
                 c.fill = _fill(bg)
                 c.font = _font(bold=(j == 0))
-                c.alignment = _align("center" if j > 0 else "left")
+                c.alignment = _align("center" if j > 0 else "left", wrap=True)
                 c.border = _border_thin()
-            ws.row_dimensions[r].height = 20
+            ws.row_dimensions[r].height = 28
+
+        _section_header(ws, row=16, col=14, title="OPEN FULFILLMENT RISK MATRIX (MT)", span=6)
+        _table_header(
+            ws,
+            row=17,
+            col=14,
+            headers=[
+                "Supply Status",
+                "Supply Status Total",
+                "Past Due LP",
+                "Future Valid LP",
+                "LP Date Unconfirmed",
+                "No Current LP",
+            ],
+            widths=[22, 18, 16, 18, 20, 18],
+        )
+        for i, row_data in enumerate(_build_lp_risk_matrix(master, lp_outputs)):
+            r = 18 + i
+            bg = C_OFF_WHITE if i % 2 == 0 else C_LIGHT_GREY
+            for j, val in enumerate(row_data):
+                c = ws.cell(row=r, column=14+j, value=val)
+                c.fill = _fill(bg)
+                c.font = _font(bold=(j == 0))
+                c.alignment = _align("center" if j > 0 else "left", wrap=True)
+                c.border = _border_thin()
+            ws.row_dimensions[r].height = 30
 
     # ── Order Type Breakdown ──
     start_row = 29
@@ -307,45 +361,45 @@ def _sheet_summary(wb, master, month, target_mt, lp_outputs=None):
     _format_summary_numbers(ws)
 
 
-def _build_lp_kpis(master, lp_outputs):
-    readiness = lp_outputs.get("shipping_readiness", pd.DataFrame())
-    reconciliation = lp_outputs.get("reconciliation", pd.DataFrame())
-    if readiness is None:
-        readiness = pd.DataFrame()
-    if reconciliation is None:
-        reconciliation = pd.DataFrame()
+def _build_shipped_closure_matrix(lp_outputs):
+    seg = lp_outputs.get("risk_matrix_detail", pd.DataFrame())
+    if seg is None or seg.empty:
+        return [["Shipped", 0, 0, 0]]
+    shipped = seg[seg["supply_status"] == "Shipped"].copy()
+    total = pd.to_numeric(shipped.get("risk_mt", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+    closed = pd.to_numeric(
+        shipped.loc[shipped["lp_coverage_status"] == "Shipped LP Closed", "risk_mt"],
+        errors="coerce",
+    ).fillna(0).sum()
+    unclear = total - closed
+    return [["Shipped", float(total) if total else 0, float(closed) if closed else 0, float(unclear) if unclear else 0]]
 
-    sc_without_lp = 0
-    sc_without_lp_rows = 0
-    if not reconciliation.empty and "reconciliation_status" in reconciliation.columns:
-        mask = reconciliation["reconciliation_status"] == "In SC only"
-        sc_without_lp = reconciliation.loc[mask, "sc_vol_mt"].sum() if "sc_vol_mt" in reconciliation.columns else 0
-        sc_without_lp_rows = int(mask.sum())
 
-    def sum_load(mask):
-        if readiness.empty or "load_mt" not in readiness.columns:
-            return 0, 0
-        return readiness.loc[mask, "load_mt"].sum(), int(mask.sum())
+def _build_lp_risk_matrix(master, lp_outputs):
+    seg = lp_outputs.get("risk_matrix_detail", pd.DataFrame())
+    if seg is None:
+        seg = pd.DataFrame()
 
-    valid_mt, valid_rows = sum_load(readiness.get("loading_date_status", pd.Series(dtype=str)) == "Valid Date")
-    unconfirmed_mt, unconfirmed_rows = sum_load(readiness.get("loading_date_status", pd.Series(dtype=str)) != "Valid Date")
-    supply_risk_mt, supply_risk_rows = sum_load(
-        readiness.get("shipping_readiness_tier", pd.Series(dtype=str)).isin(["Orange", "Red", "Critical"])
-    )
-    past_not_shipped_mt, past_not_shipped_rows = sum_load(
-        readiness.get("past_loading_not_shipped", pd.Series(dtype=bool)) == True
-    )
-    in_sc_lp_mt, in_sc_lp_rows = sum_load(readiness.get("in_sc_baseline", pd.Series(dtype=bool)) == True)
-
-    return [
-        ["SC Baseline", master["sc_vol_mt"].sum(), len(master)],
-        ["In Loading Plan", in_sc_lp_mt, in_sc_lp_rows],
-        ["SC without Loading Plan", sc_without_lp, sc_without_lp_rows],
-        ["Valid Loading Date", valid_mt, valid_rows],
-        ["Unconfirmed Loading Date", unconfirmed_mt, unconfirmed_rows],
-        ["LP with Supply Risk", supply_risk_mt, supply_risk_rows],
-        ["Past Loading Not Shipped", past_not_shipped_mt, past_not_shipped_rows],
-    ]
+    supply_order = ["FG", "WIP Scheduled", "WIP Unscheduled", "No Supply Signal"]
+    lp_order = ["Past Due LP", "Future Valid LP", "LP Date Unconfirmed", "No Current LP"]
+    rows = []
+    for supply in supply_order:
+        values = []
+        for lp_status in lp_order:
+            if seg.empty:
+                mt = 0
+            else:
+                sub = seg[(seg["supply_status"] == supply) & (seg["lp_coverage_status"] == lp_status)]
+                mt = pd.to_numeric(sub.get("risk_mt", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+            values.append(float(mt) if mt else 0)
+        row = [supply, sum(values)] + values
+        rows.append(row)
+    if rows:
+        totals = ["Open Total"]
+        for idx in range(1, len(rows[0])):
+            totals.append(sum(row[idx] for row in rows))
+        rows.append(totals)
+    return rows
 
 
 def _format_summary_numbers(ws):
@@ -397,7 +451,7 @@ def _sheet_master(wb, master):
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "A3"
 
-    _banner(ws, "SO MASTER — ALL BASELINE ORDERS", span=29)
+    _banner(ws, "SO MASTER — ALL BASELINE ORDERS", span=30)
 
     col_defs = [
         ("SO Number",        "so",               12),
@@ -424,6 +478,7 @@ def _sheet_master(wb, master):
         ("Status",           "status",            22),
         ("Risk Tier",        "risk_tier",         12),
         ("Planned End Date", "planned_end_date",  16),
+        ("Available Date",   "available_date",    16),
         ("Loading Date",     "loading_date",      14),
         ("Gap (days)",       "gap_days",          12),
         ("Machines",         "machines",          20),
@@ -464,6 +519,8 @@ def _sheet_master(wb, master):
                     c.fill = _fill(C_RED); c.font = _font(bold=True, color=C_RED_FG)
                 elif val <= 2:
                     c.fill = _fill(C_YELLOW); c.font = _font(bold=True, color=C_YELLOW_FG)
+            if field in DATE_FIELD_NAMES:
+                _apply_date_format(c, val)
         ws.row_dimensions[r].height = 18
 
     ws.auto_filter.ref = f"A2:{get_column_letter(len(col_defs))}2"
@@ -479,7 +536,7 @@ def _sheet_gap_detail(wb, master):
         (master["status"] == "In Production") & master["gap_days"].notna()
     ].sort_values("gap_days").copy()
 
-    _banner(ws, f"GAP ANALYSIS — IN PRODUCTION SOs ({len(gap_df)} orders)", span=10)
+    _banner(ws, f"GAP ANALYSIS — IN PRODUCTION SOs ({len(gap_df)} orders)", span=11)
 
     col_defs = [
         ("SO Number",        "so",               12),
@@ -489,6 +546,7 @@ def _sheet_gap_detail(wb, master):
         ("Adjusted SC Vol (MT)", "sc_vol_mt",         16),
         ("Allocated WIP",        "allocated_wip_mt",  14),
         ("Planned End Date", "planned_end_date",  16),
+        ("Available Date",   "available_date",    16),
         ("Loading Date",     "loading_date",      14),
         ("Gap (days)",       "gap_days",          12),
         ("Risk Tier",        "risk_tier",         12),
@@ -520,40 +578,58 @@ def _sheet_gap_detail(wb, master):
                     c.fill = _fill(C_GREEN); c.font = _font(bold=True, color=C_GREEN_FG)
             if field == "risk_tier" and val in RISK_STYLE:
                 c.fill, c.font = RISK_STYLE[val]
+            if field in DATE_FIELD_NAMES:
+                _apply_date_format(c, val)
         ws.row_dimensions[r].height = 18
 
     ws.auto_filter.ref = f"A2:{get_column_letter(len(col_defs))}2"
 
 
 # ── Sheet 4: Action Required ───────────────────────────────────────────────
-def _sheet_action(wb, master):
+def _sheet_action(wb, master, lp_outputs=None):
     ws = wb.create_sheet("Action Required")
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "A3"
 
-    action_df = master[
-        master["status"].isin(["No Plan", "Planned (Unscheduled)"])
-    ].sort_values(["status", "sc_vol_mt"], ascending=[True, False]).copy()
+    risk_detail = (lp_outputs or {}).get("risk_matrix_detail", pd.DataFrame())
+    if risk_detail is None:
+        risk_detail = pd.DataFrame()
+    if risk_detail.empty or "action_required" not in risk_detail.columns:
+        action_df = pd.DataFrame()
+    else:
+        action_df = risk_detail[risk_detail["action_required"]].copy()
+        action_df = action_df.sort_values(["risk_action", "risk_mt"], ascending=[True, False])
 
-    _banner(ws, f"ACTION REQUIRED — {len(action_df)} SOs NEED IMMEDIATE ATTENTION", span=10, urgent=True)
+    _banner(ws, f"ACTION REQUIRED — {len(action_df)} RISK SEGMENTS NEED FOLLOW-UP", span=15, urgent=True)
 
     col_defs = [
         ("SO Number",        "so",               12),
         ("Plant",            "plant",              8),
         ("Cluster",          "cluster",           10),
         ("Order Type",       "order_type",        22),
-        ("Adjusted SC Vol (MT)", "sc_vol_mt",         16),
-        ("Allocated Unscheduled","allocated_unsched_mt", 18),
-        ("Allocated No Plan",    "allocated_no_plan_mt", 16),
-        ("Status",           "status",            22),
-        ("Risk Tier",        "risk_tier",         12),
-        ("Loading Date",     "loading_date",      14),
+        ("SO Total MT",      "so_total_mt",       14),
+        ("Risk MT",          "risk_mt",           12),
+        ("Covered MT",       "covered_mt",        12),
+        ("Supply Status",    "supply_status",     18),
+        ("LP Coverage Status", "lp_coverage_status", 22),
+        ("Risk Action",      "risk_action",       30),
+        ("Owner",            "suggested_owner",   12),
+        ("Loading Date Raw", "lp_loading_date_raw_list", 22),
+        ("Planned End Date", "planned_end_date",  16),
+        ("Available Date",   "available_date",    16),
+        ("Gap Days",         "lp_gap_days",       10),
+        ("Action Note",      "action_note",       44),
     ]
     headers = [h for h, _, _ in col_defs]
     widths  = [w for _, _, w in col_defs]
     fields  = [f for _, f, _ in col_defs]
 
     _table_header(ws, row=2, col=1, headers=headers, widths=widths)
+
+    if action_df.empty:
+        ws.cell(row=3, column=1, value="No action-required risk segments")
+        ws["A3"].font = _font(bold=True)
+        return
 
     for i, (_, row) in enumerate(action_df.iterrows()):
         r = 3 + i
@@ -565,10 +641,12 @@ def _sheet_action(wb, master):
             c = ws.cell(row=r, column=1+j, value=val)
             c.fill = _fill(bg)
             c.font = _font()
-            c.alignment = _align("center" if j > 1 else "left")
+            c.alignment = _align("center" if j in [5, 6, 7, 14] else "left", wrap=(field == "action_note"))
             c.border = _border_thin()
-            if field == "risk_tier" and val in RISK_STYLE:
-                c.fill, c.font = RISK_STYLE[val]
+            if isinstance(val, (int, float)) and (field.endswith("_mt") or field == "risk_mt"):
+                c.number_format = "#,##0.0"
+            if field in DATE_FIELD_NAMES:
+                _apply_date_format(c, val)
         ws.row_dimensions[r].height = 18
 
     ws.auto_filter.ref = f"A2:{get_column_letter(len(col_defs))}2"
@@ -649,6 +727,9 @@ def _sheet_loading_plan_outputs(wb, lp_outputs):
     sheet_specs = [
         ("Loading Plan Clean Detail", "clean_detail"),
         ("SC vs LP Reconciliation", "reconciliation"),
+        ("Risk Matrix Detail", "risk_matrix_detail"),
+        ("LP Only Summary", "lp_not_in_baseline_summary"),
+        ("LP Not In Current Baseline", "lp_not_in_baseline_detail"),
         ("Shipping Readiness", "shipping_readiness"),
         ("LP Date Exceptions", "date_exceptions"),
         ("LP Parse Exceptions", "parse_exceptions"),
@@ -687,6 +768,8 @@ def _write_dataframe_sheet(wb, sheet_name, df):
             c.alignment = _align("center" if j > 1 else "left", wrap=False)
             if isinstance(val, (int, float)) and (str(h).endswith("_mt") or str(h) in ["load_mt", "source_mt"]):
                 c.number_format = "#,##0.0"
+            if str(h) in DATE_FIELD_NAMES:
+                _apply_date_format(c, val)
     ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}1"
 
 

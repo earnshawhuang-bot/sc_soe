@@ -95,9 +95,24 @@ def extract_lp_ks(file_path: str, data_date: str = "") -> pd.DataFrame:
 
 
 def extract_lp_idn_export(file_path: str, data_date: str = "") -> pd.DataFrame:
-    """Extract IDN export loading plan demand lines from ORDER OUTSTANDING."""
-    source_sheet = "ORDER OUTSTANDING "
-    df = pd.read_excel(file_path, sheet_name=source_sheet, header=1)
+    """Extract IDN export loading plan demand lines from ORDER OUTSTANDING and DISPATCH."""
+    frames = [
+        _extract_lp_idn_export_sheet(file_path, "ORDER OUTSTANDING ", data_date, is_dispatch=False),
+        _extract_lp_idn_export_sheet(file_path, "DISPATCH", data_date, is_dispatch=True),
+    ]
+    return combine_loading_plan_lines(*frames)
+
+
+def _extract_lp_idn_export_sheet(
+    file_path: str,
+    source_sheet: str,
+    data_date: str = "",
+    is_dispatch: bool = False,
+) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(file_path, sheet_name=source_sheet, header=1)
+    except ValueError:
+        return _standardize_output([])
     df.columns = _dedupe_columns([str(c).strip() for c in df.columns])
 
     so_col = _find_column(df, "SC No.")
@@ -105,10 +120,12 @@ def extract_lp_idn_export(file_path: str, data_date: str = "") -> pd.DataFrame:
     size_col = _find_column(df, "Cont Size")
     loading_col = _find_column(df, "ELD")
     source_mt_col = _find_column(df, "Rough Ton", required=False)
+    customer_col = _find_column(df, "Customers name", required=False) or _find_column(df, "Customer", required=False)
+    month_start = pd.to_datetime(data_date).replace(day=1).normalize() if data_date else None
 
     records = []
     for idx, row in df.iterrows():
-        customer = _clean_text(row.get(_find_column(df, "Customers name", required=False)))
+        customer = _clean_text(row.get(customer_col)) if customer_col else ""
         so_raw = _clean_text(row.get(so_col))
         if not so_raw and not customer:
             continue
@@ -119,6 +136,13 @@ def extract_lp_idn_export(file_path: str, data_date: str = "") -> pd.DataFrame:
         size = _clean_text(row.get(size_col))
         load_mt = qty * _container_size_mt(size)
         source_mt = _to_number(row.get(source_mt_col)) if source_mt_col else 0.0
+        excluded = False
+        exclude_reason = ""
+        if is_dispatch and loading_status != "Valid Date":
+            excluded = True
+            exclude_reason = "DISPATCH ELD not valid - audit only"
+        elif is_dispatch and month_start is not None and pd.notna(loading_date) and loading_date < month_start:
+            exclude_reason = "DISPATCH historical ELD before run-month start"
 
         so = _to_code_str(so_raw)
         if re.fullmatch(r"10\d{8}", so):
@@ -141,8 +165,8 @@ def extract_lp_idn_export(file_path: str, data_date: str = "") -> pd.DataFrame:
                     "loading_date_status": loading_status,
                     "load_mt": load_mt,
                     "source_mt": source_mt,
-                    "exclude_from_current_invoice": False,
-                    "exclude_reason": "",
+                    "exclude_from_current_invoice": excluded,
+                    "exclude_reason": exclude_reason,
                 },
                 so_list=so_list,
                 parse_status=parse_status,
@@ -226,7 +250,7 @@ def combine_loading_plan_lines(*frames: pd.DataFrame) -> pd.DataFrame:
     return combined
 
 
-def aggregate_loading_plan_for_master(clean_lines: pd.DataFrame) -> pd.DataFrame:
+def aggregate_loading_plan_for_master(clean_lines: pd.DataFrame, data_date: str = "") -> pd.DataFrame:
     """
     Build a SO-level view for the existing SO Master join.
 
@@ -236,12 +260,7 @@ def aggregate_loading_plan_for_master(clean_lines: pd.DataFrame) -> pd.DataFrame
     if clean_lines is None or clean_lines.empty:
         return pd.DataFrame(columns=["so", "loading_date", "load_mt", "source"])
 
-    main = clean_lines[
-        (~clean_lines["exclude_from_current_invoice"])
-        & (clean_lines["so_parse_status"] == "Parsed")
-        & clean_lines["so"].notna()
-        & (clean_lines["so"].astype(str).str.strip() != "")
-    ].copy()
+    main = _main_scope_lines(clean_lines, data_date)
     if main.empty:
         return pd.DataFrame(columns=["so", "loading_date", "load_mt", "source"])
 
@@ -267,6 +286,24 @@ def combine_loading_plans(lp_ks: pd.DataFrame, lp_idn_export: pd.DataFrame, lp_i
     agg = aggregate_loading_plan_for_master(lines)
     agg.attrs["clean_loading_plan"] = lines
     return agg
+
+
+def _main_scope_lines(clean_lines: pd.DataFrame, data_date: str = "") -> pd.DataFrame:
+    if clean_lines is None or clean_lines.empty:
+        return _standardize_output([])
+    main = clean_lines[
+        (~clean_lines["exclude_from_current_invoice"])
+        & (clean_lines["so_parse_status"] == "Parsed")
+        & clean_lines["so"].notna()
+        & (clean_lines["so"].astype(str).str.strip() != "")
+    ].copy()
+    if main.empty or not data_date:
+        return main
+
+    month_start = pd.to_datetime(data_date).replace(day=1).normalize()
+    valid_date = main["loading_date_status"] == "Valid Date"
+    historical_valid = valid_date & (pd.to_datetime(main["loading_date"], errors="coerce") < month_start)
+    return main[~historical_valid].copy()
 
 
 def _expand_record(row, base: dict, so_list: list[str], parse_status: str, parse_note: str) -> list[dict]:

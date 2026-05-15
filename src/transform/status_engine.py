@@ -17,7 +17,7 @@ def assign_status_and_gap(master: pd.DataFrame) -> pd.DataFrame:
         master: SO master DataFrame from join_engine
 
     Returns:
-        master with added columns: no_plan_mt, status, gap_days, risk_tier
+        master with added columns: no_plan_mt, status, available_date, gap_days, risk_tier
     """
     df = master.copy()
 
@@ -62,15 +62,20 @@ def assign_status_and_gap(master: pd.DataFrame) -> pd.DataFrame:
     df["status"] = _determine_status(df)
 
     # --- Gap calculation ---
-    # Only for SOs with both planned_end_date AND loading_date
+    # planned_end_date is the raw PP Lami finish date. available_date keeps
+    # the current business buffer explicit before comparing with loading date.
+    df["available_date"] = df["planned_end_date"] + pd.Timedelta(days=1)
+
+    # Only for SOs with both available_date AND loading_date. Loading Plan is
+    # currently date-grain, so compare by calendar date unless LP carries time.
     has_both = df["planned_end_date"].notna() & df["loading_date"].notna()
     df["gap_days"] = np.nan
 
     if has_both.any():
-        planned_plus_one = df.loc[has_both, "planned_end_date"] + pd.Timedelta(days=1)
-        df.loc[has_both, "gap_days"] = (
-            df.loc[has_both, "loading_date"] - planned_plus_one
-        ).dt.days
+        df.loc[has_both, "gap_days"] = _gap_days(
+            df.loc[has_both, "loading_date"],
+            df.loc[has_both, "available_date"],
+        )
 
     # --- Risk tier ---
     df["risk_tier"] = _determine_risk(df)
@@ -131,3 +136,18 @@ def _determine_risk(df: pd.DataFrame) -> pd.Series:
     risk[df["status"] == "No Plan"] = "Critical"
 
     return risk
+
+
+def _gap_days(loading_date: pd.Series, available_date: pd.Series) -> pd.Series:
+    """Compare by date when LP is date-only; preserve timestamp comparison when LP has time."""
+    loading = pd.to_datetime(loading_date, errors="coerce")
+    available = pd.to_datetime(available_date, errors="coerce")
+    loading_has_time = (
+        loading.dt.hour.fillna(0).ne(0)
+        | loading.dt.minute.fillna(0).ne(0)
+        | loading.dt.second.fillna(0).ne(0)
+        | loading.dt.microsecond.fillna(0).ne(0)
+    )
+    date_grain_days = (loading.dt.normalize() - available.dt.normalize()).dt.days
+    timestamp_days = (loading - available).dt.days
+    return timestamp_days.where(loading_has_time, date_grain_days)

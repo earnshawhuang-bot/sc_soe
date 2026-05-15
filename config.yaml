@@ -3,15 +3,15 @@
 
 month: "2026-05"
 target_mt: 25000
-data_date: "2026-05-11"  # Date when data was extracted (for time filter calculation)
+data_date: "auto"  # Runtime derives this from the latest 02-Shipped filename suffix
 
 # Data file paths (relative to project root)
 data_root: "Order Fullfill Projection"
 
 files:
-  sc: "01-SC/Order tracking 0509.xlsx"
-  shipped: "02-Shipped/GI (KS&IDN) 260501-0510.xlsx"
-  fg: "03-FG/FG stock（KS&IDN) 0511.xlsx"
+  sc: "01-SC/Order tracking 0513.xlsx"
+  shipped: "02-Shipped/GI (KS&IDN) 260501-0513.xlsx"
+  fg: "03-FG/FG stock (KS&IDN) 0514.xlsx"
   pp_scheduled:
     - "04-PP/DAVIS日生产计划表.xlsx"
     - "04-PP/SAM日生产计划表.xlsx"
@@ -24,5 +24,5 @@ files:
   customer_mapping: "07-Mapping/dim_cc_region.xlsx"
 
 # Output directory
-output_dir: "output/2026-05-11-v2"
-excel_version_suffix: "v8"
+output_dir: "output"  # Runtime writes to output/<data_date>
+excel_version_suffix: ""  # Runtime appends YYYYMMDD-HHMM to avoid overwrite

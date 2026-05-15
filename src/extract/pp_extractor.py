@@ -14,7 +14,8 @@ def extract_pp_scheduled(file_paths: list) -> pd.DataFrame:
         file_paths: List of paths to scheduled PP Excel files
 
     Returns:
-        DataFrame with columns: work_order, so, plant, machine, weight_mt, planned_end_date
+        DataFrame with columns: work_order, so, plant, machine, weight_mt, planned_end_date.
+        planned_end_date prefers PP Planned EndTime and falls back to PlannedFinishDate.
     """
     all_dfs = []
 
@@ -26,6 +27,7 @@ def extract_pp_scheduled(file_paths: list) -> pd.DataFrame:
         wo_col = _find_col(df, "工单", fallback="WorkOrder")
         so_col = _find_col(df, "SO")
         weight_col = _find_col(df, "TotalWeight", fallback="Weight")
+        end_time_col = _find_col(df, "Planned EndTime")
         date_col = _find_col(df, "plannedfinishdate", fallback="PlannedFinishDate")
         machine_col = _find_col(df, "machine", fallback="Machine")
 
@@ -42,7 +44,13 @@ def extract_pp_scheduled(file_paths: list) -> pd.DataFrame:
         temp["plant"] = plant
         temp["machine"] = df[machine_col].astype(str).str.strip()
         temp["weight_mt"] = pd.to_numeric(df[weight_col], errors="coerce").fillna(0)
-        temp["planned_end_date"] = pd.to_datetime(df[date_col], errors="coerce")
+        planned_finish = (
+            pd.to_datetime(df[date_col], errors="coerce")
+            if date_col
+            else pd.Series(pd.NaT, index=df.index)
+        )
+        planned_end_time = pd.to_datetime(df[end_time_col], errors="coerce") if end_time_col else pd.Series(pd.NaT, index=df.index)
+        temp["planned_end_date"] = planned_end_time.combine_first(planned_finish)
 
         all_dfs.append(temp)
 
@@ -97,19 +105,21 @@ def aggregate_pp_by_so(pp_sched: pd.DataFrame) -> pd.DataFrame:
     """
     Aggregate scheduled PP to SO level.
     - wip_mt = SUM(weight_mt) per SO
-    - planned_end_date = MAX(planned_end_date) per SO
+    - planned_end_date = MAX(planned_end_date) per SO, using Planned EndTime when available
     - machines = comma-joined unique machines
+    - work_orders = comma-joined unique work orders
 
     Args:
         pp_sched: Raw scheduled PP DataFrame
 
     Returns:
-        DataFrame with columns: so, wip_mt, planned_end_date, machines, plant
+        DataFrame with columns: so, wip_mt, planned_end_date, machines, work_orders, plant
     """
     agg = pp_sched.groupby("so").agg(
         wip_mt=("weight_mt", "sum"),
         planned_end_date=("planned_end_date", "max"),
         machines=("machine", lambda x: ", ".join(sorted(set(x)))),
+        work_orders=("work_order", lambda x: ", ".join(sorted(set(x)))),
         plant=("plant", "first")
     ).reset_index()
 

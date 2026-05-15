@@ -2,20 +2,26 @@
 
 ## 1. Purpose
 
-For each sales order (SO) in hand, answer three questions:
-- Has it shipped? Has it been produced? Is it scheduled?
-- If scheduled, can production finish before the required loading date?
-- If not scheduled, flag it as a risk.
+For each current-month baseline sales order (SO), answer four management questions:
+- What is this month's billing responsibility pool?
+- Where is each baseline SO in the supply execution waterfall: shipped, FG, scheduled WIP, unscheduled WO, or no supply signal?
+- Does each baseline SO have a current Loading Plan arrangement, and is the loading date confirmed?
+- If the order cannot be fulfilled smoothly, which action queue does it belong to?
 
 This is a **monthly recurring mechanism**: feed new data each month, output the same structured risk view. Target: ~25,000 MT/month across Kunshan (KS) and Indonesia (IDN).
 
 **Data nature**: Shipped = MTD cumulative (e.g. May 1–7, next time May 1–10); FG = point-in-time snapshot on data extraction day. Both refresh each run cycle.
 
+**Run anchor rule**:
+- `data_date` is derived at runtime from the latest file suffix in `02-Shipped`, for example `GI (KS&IDN) 260501-0513.xlsx` -> `2026-05-13`.
+- The report should not use the computer's current date as cutoff, because source data may lag behind the day when the report is opened.
+- Output files are written under `output/<data_date>/` and use a minute-level run suffix such as `SOE_Tracking_2026-05-20260514-1531.xlsx` to avoid overwriting same-day reruns.
+
 ---
 
 ## 2. Data Flow (one paragraph)
 
-SC table defines the **baseline** (what SOs we need to fulfill this month). We then check each SO's progress: Shipped tells us what's already gone; FG tells us what's sitting in warehouse ready to go; PP tells us what's in production and when it finishes. Loading Plan tells us the **deadline** (when each SO must be loaded). The gap between PP's planned finish date and Loading Plan's loading date is our core risk signal. SOs with no PP record and no Loading Plan entry are the highest risk.
+SC table defines the **baseline**: what SOs belong to the current-month billing responsibility pool. Shipped, FG, and PP form the **supply execution waterfall**: shipped, in stock, scheduled production, unscheduled work order, or no supply signal. Loading Plan is a separate **shipping arrangement ledger**, not a peer status to Shipped / FG / PP. It is cross-checked against the baseline and supply waterfall to determine whether the order has a confirmed loading date, an unconfirmed loading signal, or no current loading arrangement. Valid loading dates are used for gap calculation; TBA / blank / invalid loading values remain as action risks rather than being dropped.
 
 ---
 
@@ -136,7 +142,9 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 - `DAVIS日生产计划表.xlsx` — KS
 - `IND Production Plan.xlsx` — IDN
 
-**Key columns**: Work Order No., SO, TotalWeight/T, PlannedFinishDate, Machine, Plant
+**Key columns**: Work Order No., SO, TotalWeight/T, Planned EndTime, PlannedFinishDate, Machine, Plant
+
+`Planned EndTime` is the preferred planned-end field because it carries hour/minute/second precision and represents the planned Lami finish timestamp. `PlannedFinishDate` is retained only as a date-level reference or fallback when `Planned EndTime` is missing.
 
 **Unscheduled (1 file)**:
 - `Global_PP_wo schedule.xlsx`
@@ -147,86 +155,102 @@ SC table defines the **baseline** (what SOs we need to fulfill this month). We t
 
 **Multi-work-order aggregation** (one SO can have 20+ work orders across machines/files):
 - `wip_mt` = SUM of all work orders' TotalWeight under that SO
-- `planned_end_date` = MAX(PlannedFinishDate) across all work orders under that SO
-  - Rationale: the SO cannot be loaded until ALL sub-batches are complete; latest date is the bottleneck
+- `planned_end_date` = MAX(Planned EndTime) across all work orders under that SO
+  - Fallback: use `PlannedFinishDate` only when `Planned EndTime` is missing
+  - Rationale: the SO cannot be loaded until ALL sub-batches are complete; latest finish timestamp is the bottleneck
 
 > ⚠️ **Pitfall**: PP SO numbers are also stored as `float64`. Same `int(float())` conversion required.
 
 ---
 
-### 3.5 Loading Plan - Required Loading Dates (06-Loading Plan)
+### 3.5 Loading Plan - Shipping Arrangement Ledger (06-Loading Plan)
+
+Loading Plan is the shipping-arrangement ledger. It is not an execution status beside Shipped / FG / PP. It is used to identify whether a baseline SO has a confirmed loading date, an unconfirmed loading signal, or no current loading arrangement.
 
 #### 3.5.1 KS Loading Plan
 
-**File**: `LoadingPlan_20260508.xlsx` → Sheet "Loading Plan"
+**File**: `06-Loading Plan/ks_loading plan/Loading plan-May.xlsx` → Sheet `"Loading plan"`
 
 **Key columns**:
-| Column | Field | Usage |
-|--------|-------|-------|
-| A | Invoice No. | → split to get SO number |
-| D | 20GP qty | × 15 MT |
-| E | 40GP qty | × 24.5 MT |
-| F | 40HQ qty | × 24.5 MT |
-| H | Loading Date | **Required loading date (deadline)** |
+| Field | Usage |
+|-------|-------|
+| Invoice No | Split / normalize into SO |
+| 20GP / 40GP / 40HQ | Convert container count into model MT |
+| Loading | Raw loading date or unconfirmed text |
+| MT | Source-table MT, kept for audit |
+| Unnamed: 20 | Prior-invoiced marker such as `4月已开票`; excluded from current invoice scope but kept in audit |
 
-**Invoice No. splitting rules** (only 4.2% need split):
-- Underscore `_` = multi-SO separator
-  - `1000012350_11631_11479` → 3 SOs: 1000012350, 1000011631, 1000011479
-  - Short numbers inherit prefix from the longest number in the group
-- Dash `-` = container sequence within same SO (strip suffix)
-  - `1000012299-1` → SO: 1000012299
-- Combined: strip dash first, then split by underscore, then prefix-complete short numbers
-- Tonnage: after split, total MT evenly distributed across SOs
+**Container MT conversion**:
+| Container | MT |
+|-----------|----|
+| 20GP | 14.5 |
+| 40GP | 24.5 |
+| 40HQ | 24.5 |
 
-**Time filter**: Loading Date >= (data_date − 3 days)
-
-**Join**: Split SO → SC.SO
-
----
+**Invoice No. parsing rules**:
+- `_` separates multiple SOs.
+- `-N` is a batch/container suffix and is stripped.
+- `-N~M` is a multi-container range and is stripped to the same base SO.
+- Short SO fragments inherit the prefix from the longest 10-digit SO in the invoice group.
+- Non-standard `LM*` invoices are kept in parse-exception audit and excluded from SO matching.
+- Tonnage is evenly allocated across parsed SOs when one source row maps to multiple SOs.
 
 #### 3.5.2 IDN Export - Schedule Planning Dispatch
 
-**File**: `Schedule Planning Dispatch 260508.xlsx` → Sheet `"ORDER OUTSTANDING "` *(trailing space in sheet name)*
+**File**: `06-Loading Plan/idn_loading plan/Schedule Planning Dispatch 260511.xlsx`
+
+This workbook is now treated as two appendable Loading Plan sources:
+
+| Sheet | Business meaning | Current-scope rule |
+|-------|------------------|--------------------|
+| `ORDER OUTSTANDING ` | Open / outstanding IDN export loading plan | Kept as current LP evidence, including TBA / blank / invalid ELD values as unconfirmed loading risks |
+| `DISPATCH` | Already dispatched IDN export loading plan | Appended to IDN export LP so IDN has a full loading ledger; valid ELD rows are kept only from the run-month first day onward |
+
+The `DISPATCH` sheet uses the same header family as `ORDER OUTSTANDING `. Some trailing columns may be missing; extraction should align by header name rather than fixed column count.
 
 **Key columns**:
-| Column | Field | Usage |
-|--------|-------|-------|
-| C | SC No. | SO number (direct, no split needed) |
-| E | Region | Cluster (SEA/ISU/MEA) |
-| J | Cont Qty | Container quantity |
-| K | Cont Size | 40'HC=24.5MT, 20'=15MT |
-| S | ELD | **Required loading date (deadline)** |
+| Field | Usage |
+|-------|-------|
+| SC No. | Direct SO key, normalized from Excel numeric format |
+| Region | Cluster reference |
+| Cont Qty / Cont Size | Convert to MT using 14.5 / 24.5 rule |
+| Rough Ton | Source-table MT, kept for audit |
+| ELD | Raw loading date or unconfirmed value such as TBA |
 
-**Tonnage**: Cont Qty × corresponding MT per size
+`DISPATCH` inclusion rule:
+- For a run month such as `2026-05`, only valid `ELD >= 2026-05-01` enters the current main LP ledger from `DISPATCH`.
+- Valid `ELD` earlier than the run-month first day is treated as historical dispatched LP evidence and excluded from current management analysis.
+- Blank / invalid `ELD` in `DISPATCH` should be retained in audit first; whether it enters the main current ledger requires business confirmation because the sheet is supposed to represent already dispatched orders.
 
-**Time filter**: ELD >= (data_date − 3 days)
-
-**Join**: SC No. → SC.SO (direct match, 100% pure numbers)
-
-> ⚠️ **Pitfall**: Sheet name has a trailing space: `"ORDER OUTSTANDING "`. Must match exactly.
-
----
+> ⚠️ **Pitfall**: Sheet name has a trailing space: `"ORDER OUTSTANDING "`. Must match exactly. `DISPATCH` does not have this trailing-space requirement.
 
 #### 3.5.3 IDN Domestic - New Domestic Tracking
 
-**File**: `NEW DOMESTIC TRACKING 260508.xlsx` → Sheet `"Order List"`, headers in **row 2**
+**File**: `06-Loading Plan/idn_loading plan/NEW DOMESTIC TRACKING 260511.xlsx` → Sheet `"Order List"`, headers in **row 2**
 
 **Key columns**:
-| Column | Field | Usage |
-|--------|-------|-------|
-| D | INV NO. | → split to get SO number |
-| G | ELD | **Required loading date (deadline)** |
-| P | Weight | Actual weight in MT |
+| Field | Usage |
+|-------|-------|
+| SC NO. | Preferred SO key when valid |
+| INV NO. | Fallback split source when SC NO. is not valid |
+| ELD | Raw loading date or unconfirmed value |
+| Weight | Loading MT |
+| STATUS | Operational reference |
 
-**INV NO. splitting rules** (for 10-prefixed orders only; `LMIDSAM*` and other non-10 prefixes → discard):
-- Comma `,` or Ampersand `&` = multi-SO separator
-- Dash `-` = batch/trip number → strip suffix, keep SO number before dash
-- Processing order: split by `,` or `&` first → strip `-N` from each part
-- Tonnage: P column Weight evenly distributed across SOs after split
+**IDN Domestic parsing rules**:
+- Prefer valid `SC NO.`.
+- If `SC NO.` is missing or invalid, split `INV NO.`.
+- Comma and ampersand split multiple SOs.
+- `-N` and `-N~M` suffixes are stripped.
+- `LMIDSAM*` and other non-SO records remain in parse-exception audit.
 
-**Time filter**: ELD >= (data_date − 3 days)
+#### 3.5.4 Main-Scope Filtering
 
-**Join**: Split SO → SC.SO
+Extraction keeps clean detail records at demand-line level and does not aggregate to SO. Main analysis then applies scope logic:
+- Exclude explicit prior-invoiced records from current invoice scope, but retain them in audit.
+- Exclude valid loading dates before the run-month start, but retain them as historical LP evidence.
+- Keep TBA / blank / text-month / invalid-text loading values in main analysis because they are unconfirmed loading risks.
+- Only in-scope valid loading dates participate in production-vs-loading gap calculation.
 
 ---
 
@@ -329,7 +353,8 @@ Gap (days) = Loading_Date − (MAX(Planned_End_Date) + 1)
 - **Summary**: Banner + KPI cards + Risk Distribution + By Plant + Risk Tier Logic + Order Type Breakdown + **Plant × Region (Cluster) breakdown**
 - **SO Master**: Full detail per SO, including adjusted baseline, SC prior-month delivery pre-allocation, raw source quantities, allocated waterfall quantities, gap, and risk
 - **Gap Analysis**: In-Production SOs only, sorted by gap ascending, gap cells color-coded
-- **Action Required**: No Plan + Unscheduled SOs, urgent red banner
+- **Risk Matrix Detail**: Segment-level fact table behind the Summary Shipped Data Closure and Open Fulfillment Risk Matrix
+- **Action Required**: Action-required subset of Risk Matrix Detail, no longer generated from SO-level `Status`
 - **Overlap Audit**: SOs where raw source quantities exceed adjusted baseline; used for explanation, not management KPI
 - **SC Row Detail / SC Fresh Next Month / SC Unknown Type / Unmatched End Customer**: SC baseline audit sheets
 
@@ -341,19 +366,26 @@ Gap (days) = Loading_Date − (MAX(Planned_End_Date) + 1)
   - `SHIPPED` = allocated shipped volume, including SC prior-month delivery pre-allocation and normal GI shipped
   - `IN STOCK (FG)` = allocated FG volume
   - `IN PRODUCTION` = allocated WIP volume
-  - `SCHEDULING` = allocated unscheduled + allocated no-plan volume
+  - Legacy `SCHEDULING` = allocated unscheduled + allocated no-plan volume; after Loading Plan redesign, this should be split into `Production Unscheduled` and `No Supply Signal` because they require different actions
 - Risk Distribution columns: `Risk Tier`, `Volume (MT)`, `% of Baseline`.
 - By Plant columns: `Plant`, `Baseline MT`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`, `Red+Critical MT`.
+- Dashboard should keep a compact `BY PLANT` row-level summary table near the top: `Plant`, `Baseline MT`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`. It is a factory split of the first-layer baseline execution status, not a separate risk layer. Cells should remain numeric MT values, with units in the title or headers.
 - Order Type Breakdown columns: `Order Type`, `Volume (MT)`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`.
 - By Plant × Region (Cluster) columns: `Plant`, `Cluster`, `Baseline MT`, `Shipped`, `FG`, `WIP`, `Unscheduled`, `No Plan`, `Red+Critical MT`, `% Fulfilled`.
 - By Plant × Region includes plant-level `TOTAL` rows before cluster-level detail rows.
 - `% Fulfilled` = `(Shipped + FG) / Baseline MT`; WIP, Unscheduled, and No Plan remain future fulfillment exposure.
 
-### HTML Report (single-page narrative)
-- Section 1: Monthly overview — target vs progress waterfall bar
-- Section 2: Risk distribution table
-- Section 3: By Plant table
-- Section 4: Top 20 risk items
+Loading Plan redesign note:
+- Do not present `No Supply Signal` and `No Loading Arrangement` as the same thing.
+- `Production Unscheduled` belongs to the supply execution dimension: a work order exists but has no planned finish date.
+- `No Supply Signal` also belongs to the supply execution dimension: no shipped, FG, scheduled WIP, or unscheduled WO evidence exists.
+- `No Loading Arrangement` belongs to the shipping arrangement dimension: no current-scope Loading Plan evidence exists.
+- The Summary page should not add a standalone Loading Plan coverage block. It should show baseline execution first, then use the risk matrix to show how loading arrangement changes the action interpretation.
+
+### Dashboard HTML
+- `SOE_Dashboard_<month>-<run_suffix>.html` is the primary management-facing front end.
+- The legacy narrative `SOE_Report_<month>-<run_suffix>.html` is no longer required once the dashboard carries the executive summary, matrix, and drill-down details.
+- Visual style should use an executive-report palette: warm ivory background, deep navy titles, muted teal/blue and gold accents, and light warm-gray table rules rather than heavy saturated blue headers.
 
 ---
 
@@ -376,24 +408,48 @@ The Summary sheet presents all three levels: total KPIs → by Plant → by Plan
 ## 8. Logical Closed Loop
 
 ```
-        SC Baseline (what we OWE)
-              │
-    ┌─────────┼─────────┐
-    ▼         ▼         ▼
- Shipped    FG Stock   PP Schedule
- (done)    (ready)    (in progress)
-                         │
-                         ▼
-              Loading Plan (DEADLINE)
-                         │
-                         ▼
-                  Gap = Deadline − Production
-                         │
-                         ▼
-              Risk Signal → Action Required
+SC Baseline (current-month responsibility)
+        |
+        v
+Supply Execution Waterfall
+  - Shipped
+  - FG
+  - WIP Scheduled
+  - WIP Unscheduled
+  - No Supply Signal
+        |
+        v
+Shipped Data Closure
+  - Shipped quantity is audit / closure, not open fulfillment risk
+  - Cross-check shipped quantity against current-month LP evidence
+        |
+        v
+Open Fulfillment Risk Matrix
+  rows    = open supply execution status: FG / WIP Scheduled / WIP Unscheduled / No Supply Signal
+  columns = Past Due LP / Future Valid LP / LP Date Unconfirmed / No Current LP
+        |
+        v
+Action Queue
+  - FG without Loading Plan
+  - Loading Plan without Supply Signal
+  - WIP late vs Loading Date
+  - LP Date Unconfirmed
+  - Production Unscheduled
+  - No Supply and No Loading Signal
 ```
 
-Every SO in the baseline can have multiple raw source signals, but the allocated waterfall is mutually exclusive and sums back to adjusted SC baseline. This is the MECE closure used for management KPIs.
+Every SO in the baseline can have multiple raw source signals, but the allocated supply waterfall is mutually exclusive and sums back to adjusted SC baseline. This is the MECE closure used for management KPIs.
+
+Loading Plan is not a separate execution bucket in the Summary page. It is the shipping-arrangement dimension used inside the risk matrix. Shipped quantity is handled as data closure: if it has matching LP evidence, the loop is closed; if not, it is a data consistency exception. Open quantity then enters the risk matrix.
+
+`Past Due LP` must be defined by quantity, not by date alone:
+
+```text
+Past Due LP = valid LP quantity with loading_date < data_date
+              minus the quantity already covered by shipped evidence
+```
+
+This avoids calling an old LP date "past due" when the same demand has already been shipped. `Past Due LP` is shown before `Future Valid LP` because it is already late and needs earlier management attention.
 
 ---
 
@@ -407,7 +463,7 @@ Every SO in the baseline can have multiple raw source signals, but the allocated
 | 4 | SC rows | One SO can have multiple rows and even multiple order types | Classify/adjust at row level, then aggregate to SO with type-specific columns |
 | 5 | All numeric IDs | SO/plant codes stored as `float64` in Excel (e.g. `1000011733.0`) — `.astype(str)` gives `"1000011733.0"`, breaks regex | Convert via `str(int(float(value)))` |
 | 6 | Shipped SO column | Two columns named "销售订单"; pandas deduplicates to `.1`; P column has internal order numbers, Q column (`.1`) has SC numbers | Prefer the column where values start with `"10"` |
-| 7 | IDN Dispatch sheet | Sheet name has trailing space: `"ORDER OUTSTANDING "` | Match with trailing space |
+| 7 | IDN Schedule Planning Dispatch | `ORDER OUTSTANDING ` has a trailing space; `DISPATCH` is a second sheet in the same workbook and should be appended for IDN full LP coverage | Match `ORDER OUTSTANDING ` exactly; also read `DISPATCH`, align by headers, and keep only valid `ELD >= run-month first day` in current main scope |
 | 8 | SC Loading Date (P) | Not reliable as a required loading deadline, but useful for the SC prior-month delivery pre-allocation window | Never use as fallback for gap calculation; only use for the explicit previous-month SC delivery filter |
 | 9 | Raw source overlap | Same SO can appear in Shipped, FG, and PP simultaneously, causing raw sums to exceed baseline | Use allocated waterfall for KPIs; keep raw quantities in Overlap Audit |
 | 10 | SC Delivery PCS | Negative delivery PCS rows reverse/correct delivery signals | Exclude negative Delivery PCS rows from SC prior-month delivery pre-allocation |
@@ -420,11 +476,16 @@ Every SO in the baseline can have multiple raw source signals, but the allocated
 
 The model is upgraded from a pure order execution tracker into a **monthly billing-order shipping fulfillment model**.
 
-It answers four management questions:
-- Which SC baseline orders are this month's billing responsibility?
-- Which of those orders already have a Loading Plan arrangement?
-- For all Loading Plan demand, is the shipping arrangement confirmed or still unconfirmed?
-- Does Shipped / FG / PP evidence support the loading demand, and where is the risk?
+It answers one page-level decision mission:
+
+```
+Can the current-month SC baseline orders be fulfilled, and if not, where is the action risk?
+```
+
+The management story is intentionally baseline-led:
+- First, use SC Baseline as the denominator and classify where the goods are in the supply execution waterfall.
+- Second, use the risk action matrix to cross-check the supply execution status with the Loading Plan shipping-arrangement signal.
+- Third, route exceptions into action queues such as FG without Loading Plan, Loading Plan without supply signal, production missing loading date, and unconfirmed loading date.
 
 The key design principle is:
 
@@ -435,6 +496,12 @@ Shipped / FG / PP = supply execution status
 ```
 
 Loading Plan is **not** a peer status to Shipped / FG / PP. It is a separate shipping-arrangement dimension that must be cross-checked against supply readiness.
+
+Summary and management views must therefore avoid mixing these dimensions into one flat status list. They also should not introduce Loading Plan as a standalone Summary block. The correct narrative is:
+
+```
+Baseline responsibility -> supply execution status -> risk action matrix -> action queue
+```
 
 ---
 
@@ -475,7 +542,9 @@ KS SO parsing:
 Source:
 - Folder: `06-Loading Plan/idn_loading plan/`
 - File: `Schedule Planning Dispatch 260511.xlsx`
-- Sheet: `ORDER OUTSTANDING `, with trailing space.
+- Sheets:
+  - `ORDER OUTSTANDING `, with trailing space: open / outstanding export loading plan.
+  - `DISPATCH`: already dispatched export loading plan; append to the same IDN export LP stream.
 
 Key fields:
 | Field | Usage |
@@ -485,6 +554,13 @@ Key fields:
 | Cont Qty / Cont Size | Convert to MT using the same 14.5 / 24.5 rule |
 | Rough Ton | Source-table MT for audit only |
 | ELD | Loading date or unconfirmed loading value such as TBA |
+
+IDN export append rules:
+- `ORDER OUTSTANDING ` and `DISPATCH` share the same header family. `DISPATCH` may miss trailing columns; align by semantic header names.
+- Add source lineage fields so the output can distinguish `lp_source = IDN_Export` and `source_sheet = ORDER OUTSTANDING / DISPATCH`.
+- `DISPATCH` contains historical rows. For current management analysis, keep valid `ELD` rows only from the run-month first day onward, for example `ELD >= 2026-05-01` for a May 2026 run.
+- Earlier valid `DISPATCH` ELD rows are historical dispatched LP evidence and stay available for audit rather than current open-risk analysis.
+- Blank / invalid `DISPATCH` ELD rows should be retained in audit first; whether they enter main current scope needs business confirmation.
 
 #### IDN Domestic Loading Plan
 
@@ -541,11 +617,15 @@ Standard fields:
 Important rule:
 
 ```
-All non-excluded Loading Plan records participate in cross-validation.
-Only Valid Date records participate in gap calculation.
+Clean detail keeps all Loading Plan records for audit.
+Main analysis excludes historical valid loading dates before the run-month start and explicit prior-invoiced records.
+TBA / blank / text-month / invalid-text records remain in main analysis as unconfirmed loading risks.
+Only in-scope Valid Date records participate in gap calculation.
 ```
 
-TBA, blank, text-month, and invalid-text loading values are not dropped. They are treated as unconfirmed shipping risks.
+For a run month such as `2026-05`, a parsed valid loading date before `2026-05-01` is treated as historical Loading Plan evidence. It is retained in audit detail but does not participate in the current-month SC vs LP reconciliation or Shipping Readiness main view. A valid loading date in the run month or after the run month remains in scope because it can still explain whether the current baseline order is arranged, late, or pushed out.
+
+TBA, blank, text-month, and invalid-text loading values are not dropped. They are treated as unconfirmed shipping risks because the business confirmed these values usually represent orders that still require attention.
 
 ---
 
@@ -561,10 +641,25 @@ Loading Plan = sales-side open delivery / loading arrangement ledger
 Reconciliation categories:
 | Category | Meaning |
 |----------|---------|
-| In SC and In LP | Current billing SO has loading arrangement |
-| In SC only | Current billing SO has no loading arrangement |
-| In LP only | Loading Plan has SO not in current SC baseline |
+| In SC and In LP | Current billing SO has positive-MT, main-scope Loading Plan arrangement |
+| In SC only | Current billing SO has no positive-MT, main-scope Loading Plan match |
+| In LP only | Main-scope Loading Plan has SO not in current SC baseline |
 | LP excluded - prior invoiced | Excluded from current billing scope but retained in audit |
+
+Important interpretation:
+- `In SC only` does **not** always mean the SO never appeared anywhere in the raw Loading Plan. It means the SO has no usable current-scope LP quantity after parsing, prior-month valid-date exclusion, prior-invoiced exclusion, and zero-MT handling.
+- If an SO has TBA / blank / invalid loading date but has positive MT and can be parsed, it remains `In SC and In LP` and is flagged as unconfirmed loading.
+- Rows where both SC MT and LP MT are zero should be removed from the management reconciliation output because they do not represent an actionable business population.
+
+Recommended reconciliation support fields:
+| Field | Purpose |
+|-------|---------|
+| lp_loading_date_raw_list | Show original Loading / ELD values from source files |
+| lp_earliest_valid_loading_date | Earliest parsed valid loading date, if any |
+| lp_loading_date_status_mix | Date quality mix such as `Valid Date`, `TBA`, `Blank`, `Invalid Text` |
+| lp_match_scope | Current LP / Historical LP only / Excluded LP only / No LP evidence |
+| lp_line_count | Count of source LP lines supporting the SO |
+| lp_parse_exception_flag | Indicates possible missed match due to invoice/SO parsing issue |
 
 The key management interpretation:
 - `In SC only + FG`: goods are ready but no loading arrangement exists.
@@ -576,25 +671,45 @@ The key management interpretation:
 
 ### 10.5 Shipping Readiness Matrix
 
-Shipping readiness cross-checks Loading Plan demand against supply evidence:
+Shipping readiness cross-checks baseline supply status against loading arrangement coverage. The Summary view is split into two pieces so shipped quantity does not distort open fulfillment risk.
 
-| Loading Plan State | Supply Evidence | Interpretation |
-|--------------------|-----------------|----------------|
-| Valid Date | Shipped | Covered by Shipped |
-| Valid Date | FG | Covered by FG |
-| Valid Date | WIP on time | Production can support loading |
-| Valid Date | WIP late | Production misses loading date |
-| Valid Date | Unscheduled WO | Work order exists but completion date is missing |
-| Valid Date | No supply | Loading arranged but no supply signal |
-| TBA / Blank / Text / Invalid | Any supply state | Loading date is unconfirmed; still participates in risk review |
+#### 10.5.1 Shipped Data Closure
+
+`Shipped` quantity is already fulfilled. It should not be mixed with open risk rows. It is reviewed as data closure:
+
+| Supply Status | Total MT | LP Closed / Matched | LP Missing or Unclear |
+|---------------|---------:|--------------------:|----------------------:|
+| Shipped | shipped baseline quantity | shipped quantity with current-month LP evidence | shipped quantity without usable LP evidence |
+
+This block answers whether shipped baseline quantity has a matching LP trail. The new IDN `DISPATCH` sheet is important here because it contains IDN export records that may already have shipped and therefore should close the LP loop for shipped IDN orders.
+
+#### 10.5.2 Open Fulfillment Risk Matrix
+
+Open quantity excludes shipped quantity and focuses on what still needs action:
+
+| Supply Status | Past Due LP | Future Valid LP | LP Date Unconfirmed | No Current LP |
+|---------------|-------------|-----------------|---------------------|---------------|
+| FG | Goods are ready but the planned loading date has passed and is not closed by shipped evidence | Ready to ship; check whether loading date is reasonable | Goods ready but shipping date unconfirmed | **FG without Loading Plan** |
+| WIP Scheduled | Production exists, but the loading date has passed and is not closed by shipped evidence | Check whether planned finish can meet loading date | Production exists but shipping date unconfirmed | Production scheduled but no shipping arrangement |
+| WIP Unscheduled | Loading date has passed, but production has no finish date | Shipping demand exists but production has no finish date | Production and shipping date are both uncertain | Production and shipping are both unconfirmed |
+| No Supply Signal | **Past-due loading arrangement but no supply signal** | **Loading arranged but no supply signal** | LP unconfirmed and no supply signal | Baseline order has no supply or shipping signal |
+
+Definitions:
+- `Supply Status` comes from the allocated baseline waterfall: Shipped -> FG -> WIP Scheduled -> WIP Unscheduled -> No Supply Signal.
+- `Past Due LP` means valid LP quantity with `loading_date < data_date` that is not already covered by shipped quantity.
+- `Future Valid LP` means valid LP quantity with `loading_date >= data_date` for remaining open demand.
+- `LP Date Unconfirmed` means the SO has LP evidence but loading date is TBA / blank / text-month / invalid.
+- `No Current LP` means no positive-MT LP coverage remains after current-scope filtering.
+- LP status should be allocated at quantity level where possible. Do not simply paste one SO-level LP status onto every supply segment if that would duplicate LP coverage.
 
 Gap logic remains:
 
 ```
-LP Gap Days = Loading Date - (Planned End Date + 1 day)
+Available Date = Planned EndTime + 1 day
+LP Gap Days = Loading Date - Available Date
 ```
 
-But this gap is computed only when Loading Date is valid.
+Because current LP loading dates are mostly date-level, gap should be compared at date grain for now. If LP later carries explicit loading timestamps, the model can upgrade to timestamp-level comparison. This gap is computed only for open WIP Scheduled quantity with valid loading date.
 
 ---
 
@@ -608,14 +723,141 @@ The Excel workbook includes these Loading Plan sheets:
 - `LP Parse Exceptions`
 - `LP Excluded Prior Invoiced`
 
-Summary also includes a Loading Plan readiness panel:
-- SC Baseline
-- In Loading Plan
-- SC without Loading Plan
-- Valid Loading Date
-- Unconfirmed Loading Date
-- LP with Supply Risk
-- Past Loading Not Shipped
+Summary page decision mission:
+
+```
+Can current-month baseline orders be fulfilled, and what needs management action first?
+```
+
+The Summary page is baseline-led. It should not present Loading Plan as another execution status beside Shipped / FG / WIP, and it should not add a separate standalone Loading Plan coverage section. Loading Plan appears inside the risk matrix as the shipping-arrangement axis.
+
+Block 1 - Baseline Execution Status:
+| Metric | Purpose |
+|--------|---------|
+| Baseline MT | Current-month responsibility denominator |
+| Shipped MT | Already fulfilled |
+| FG MT | Goods ready, shipping execution required |
+| WIP Scheduled MT | Production has planned finish date |
+| WIP Unscheduled MT | Work order exists, finish date missing |
+| No Supply Signal MT | No shipped, FG, scheduled WIP, or unscheduled WO signal |
+
+Block 2 - Shipped Data Closure:
+| Supply Status | Total MT | LP Closed / Matched | LP Missing or Unclear |
+|---------------|---------:|--------------------:|----------------------:|
+| Shipped | numeric shipped MT | numeric matched MT | numeric exception MT |
+
+This is an audit / closure block, not the open action-risk matrix. It answers whether already shipped baseline volume can be tied back to current-month LP evidence. The IDN `DISPATCH` append is part of this closure design.
+
+Block 3 - Open Fulfillment Risk Matrix:
+| Supply Status | Supply Status Total | Past Due LP | Future Valid LP | LP Date Unconfirmed | No Current LP |
+|---------------|--------------------:|------------:|----------------:|--------------------:|--------------:|
+| FG | numeric MT | numeric MT | numeric MT | numeric MT | numeric MT |
+| WIP Scheduled | numeric MT | numeric MT | numeric MT | numeric MT | numeric MT |
+| WIP Unscheduled | numeric MT | numeric MT | numeric MT | numeric MT | numeric MT |
+| No Supply Signal | numeric MT | numeric MT | numeric MT | numeric MT | numeric MT |
+| Open Total | numeric MT | numeric MT | numeric MT | numeric MT | numeric MT |
+
+Supporting drill-down fields may still include historical LP evidence, LP-only MT, raw loading date lists, and parse exception flags. They should support investigation, but they should not become a separate Summary narrative layer.
+
+Primary sorting anchor for management action is MT volume, not SO count. SO count can be used as supporting context in drill-down tables.
+
+Summary matrix formatting rule:
+- Matrix cell values must be numeric MT values, not text strings.
+- Do not append `MT` or SO counts inside matrix cells.
+- Add a numeric `Supply Status Total` column immediately after `Supply Status`; it equals the row sum across Past Due LP, Future Valid LP, LP Date Unconfirmed, and No Current LP.
+- Place `Past Due LP` before `Future Valid LP` because already-late loading commitments should be reviewed first.
+- Express the unit in the section title or header, for example `Open Fulfillment Risk Matrix (MT)`.
+- This keeps the matrix directly usable for Excel formulas, row totals, column totals, and audit checks back to baseline.
+
+#### Risk Matrix Detail as the fact table
+
+`Risk Matrix Detail` is the single fact table behind the Summary risk matrix and the Action Required sheet.
+
+Grain:
+
+```
+one SO + one allocated supply segment + one Loading Plan coverage segment
+```
+
+This means one SO may appear multiple times if its baseline quantity is split across Shipped, FG, WIP Scheduled, WIP Unscheduled, and No Supply Signal. It may also split by LP coverage status when only part of the quantity has past-due LP, future valid LP, unconfirmed LP, or no LP. This avoids overstating the whole SO as a risk when only part of its quantity is exposed.
+
+Recommended fields:
+| Field | Meaning |
+|-------|---------|
+| so | Sales order |
+| plant / cluster / order_type | Management dimensions |
+| so_total_mt | Full adjusted baseline quantity for context |
+| supply_status | Shipped / FG / WIP Scheduled / WIP Unscheduled / No Supply Signal |
+| lp_coverage_status | Past Due LP / Future Valid LP / LP Date Unconfirmed / No Current LP / Shipped LP Closed |
+| risk_mt | Allocated MT for this segment; the primary action anchor |
+| covered_mt | SO quantity already covered by better supply segments, for context |
+| shipped_closed_mt | LP quantity already closed by shipped evidence, for shipped audit and past-due calculation |
+| lp_loading_date_raw_list | Original Loading / ELD values |
+| lp_earliest_valid_loading_date | Earliest valid current-scope loading date |
+| planned_end_date | Raw PP Planned EndTime, aggregated to latest timestamp per SO; represents Lami finish time |
+| available_date | `planned_end_date + 1 day`; current available-to-ship reference timestamp used for gap checks |
+| lp_gap_days | Loading date minus available date, when computable; current comparison is date-grain if LP has no time |
+| risk_action | Business action label such as `FG without Loading Plan` |
+| action_required | Boolean flag used to derive Action Required |
+| suggested_owner | Suggested owner such as Logistics / Planning / Plant / Sales Ops |
+| action_note | Short business explanation |
+
+Dashboard display rules:
+
+- Excel / `Risk Matrix Detail` remains a stable fact table with complete fields for filtering, pivoting, and audit.
+- The dashboard detail area is a business workbench; after a matrix cell is clicked, detail columns may change by scenario.
+- `planned_end_date / available_date / machines / work_orders` are shown only for `WIP Scheduled`.
+- `loading_date` is shown only for `Past Due LP / Future Valid LP`; it is hidden for `No Current LP`.
+- `LP Date Unconfirmed` does not show a formal `loading_date`; it shows `lp_loading_date_raw_list / lp_loading_date_status_mix` instead.
+- `lp_gap_days` is calculated and shown only for `WIP Scheduled + valid loading date`, and highlighted in the dashboard.
+- `risk_mt / risk_action / suggested_owner / action_note` are shown in every dashboard detail scenario.
+- For `WIP Scheduled`, the business reading order is: `Risk MT -> Machine -> Planned End -> Available Date -> Loading Date -> Gap -> Risk Action -> Owner -> Work Order -> Action Note`.
+- PP inputs should use `Planned EndTime`; Excel and dashboard outputs should preserve at least minute-level display. Seconds can remain in the data layer while the UI shows minutes.
+- `Available Date = Planned EndTime + 1 day`; current LP date-grain means gap is compared by date, and can later move to timestamp-grain when LP carries time.
+- The dashboard `Selected Risk Detail` area should provide a CSV download button. It exports the current Plant filter and selected matrix cell detail; if no cell is selected, it exports the default action-required detail.
+- The dashboard HTML remains a standalone static snapshot that can be opened directly in Edge / Chrome, but it embeds detail data and must be distributed with access control in mind.
+
+#### LP Not In Current SC Baseline
+
+`Open Fulfillment Risk Matrix` is baseline-led; its denominator is current-month SC baseline open quantity.
+
+`LP Not In Current SC Baseline` is LP-led reconciliation exception reporting. Its denominator is current-scope Loading Plan quantity that cannot be matched back to the current-month SC baseline. It should not be mixed into the fulfillment risk matrix; it should be shown as a separate third block.
+
+Summary structure:
+
+| LP Status | MT |
+|-----------|---:|
+| Past Due LP | numeric MT |
+| Future Valid LP | numeric MT |
+| LP Date Unconfirmed | numeric MT |
+| Total | numeric MT |
+
+Do not show SO Count in this block. Management should first read MT volume; SO count can be derived from the detail table or CSV if needed.
+
+Detail grain:
+
+```
+one current-scope Loading Plan detail line
+```
+
+Recommended dashboard / Excel detail fields:
+
+```
+SO / Plant / LP Source / Source Sheet / Invoice No Raw
+Loading Date Raw / Loading Date / LP Date Status / Load MT
+```
+
+This block answers whether Loading Plan contains future-month orders, missing baseline orders, cross-month arrangements, or loading demand that still needs business ownership clarification.
+
+Derived outputs:
+| Output | Source | Purpose |
+|--------|--------|---------|
+| Summary Shipped Data Closure | Pivot shipped rows / shipped closure fields from `Risk Matrix Detail` | Show whether shipped quantity has LP evidence |
+| Summary Open Fulfillment Risk Matrix | Pivot non-shipped rows from `Risk Matrix Detail` | Show MT by open supply status and LP coverage status |
+| Dashboard LP Not In Current SC Baseline | Summarize `lp_not_in_baseline_detail` | Show LP-led reconciliation exceptions outside the baseline fulfillment matrix |
+| Action Required | Filter `Risk Matrix Detail` where `action_required = True` | Show only rows requiring follow-up |
+
+`Action Required` should therefore not be generated from SO-level `Status`. SO-level `Status` can remain in `SO Master` as a worst-exposure signal, but management actions should be driven by `risk_mt` at segment level.
 
 ---
 
@@ -629,6 +871,7 @@ Phase 2 target structure:
 output/<run>/data_mart/
   clean_loading_plan_lines.csv
   sc_lp_reconciliation.csv
+  risk_matrix_detail.csv
   shipping_readiness.csv
   risk_summary.csv
   lp_date_exceptions.csv

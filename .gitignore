@@ -15,6 +15,9 @@ Order Fullfill Projection/**
 !Order Fullfill Projection/07-Mapping/
 !Order Fullfill Projection/07-Mapping/.gitkeep
 /output/
+*.zip
+*_print.html
+*_preview.png
 
 # Python
 __pycache__/
